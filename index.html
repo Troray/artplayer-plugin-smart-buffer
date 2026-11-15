@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Buffer Engine — 智能视频加载与弱网并发优化演示</title>
+  <!-- ArtPlayer & hls.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
+  <!-- Smart Buffer Plugin (Compiled UMD / Global) -->
+  <script src="./dist/index.global.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background: #121214;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      padding: 24px;
+    }
+    header {
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 22px;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .badge {
+      background: #0288d1;
+      color: #fff;
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .main-layout {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 20px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .player-section {
+      background: #1c1c1f;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid #2a2a2e;
+    }
+    #artplayer {
+      width: 100%;
+      height: 520px;
+    }
+    .stream-bar {
+      padding: 12px 16px;
+      background: #232328;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .stream-bar input {
+      flex: 1;
+      background: #141416;
+      border: 1px solid #333;
+      padding: 6px 12px;
+      color: #fff;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    .stream-bar button {
+      background: #1976d2;
+      color: #fff;
+      border: none;
+      padding: 6px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .stream-bar button:hover {
+      background: #1565c0;
+    }
+    .control-panel {
+      background: #1c1c1f;
+      border: 1px solid #2a2a2e;
+      border-radius: 8px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .panel-block {
+      background: #242429;
+      border-radius: 6px;
+      padding: 14px;
+      border: 1px solid #2e2e34;
+    }
+    .panel-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #4fc3f7;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .sim-buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .sim-btn {
+      background: #2f2f36;
+      border: 1px solid #444;
+      color: #ddd;
+      padding: 7px;
+      font-size: 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.2s;
+    }
+    .sim-btn:hover {
+      background: #3b3b44;
+      border-color: #666;
+    }
+    .sim-btn.active {
+      background: #0288d1;
+      border-color: #4fc3f7;
+      color: #fff;
+      font-weight: bold;
+    }
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .metric-item {
+      background: #18181b;
+      padding: 8px;
+      border-radius: 4px;
+      border-left: 3px solid #0288d1;
+    }
+    .metric-label {
+      color: #888;
+      font-size: 11px;
+    }
+    .metric-value {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      margin-top: 2px;
+    }
+    .tag-green { color: #81c784; }
+    .tag-orange { color: #ffb74d; }
+    .tag-blue { color: #4fc3f7; }
+    .tag-red { color: #e57373; }
+    .instructions {
+      font-size: 12px;
+      line-height: 1.6;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>
+      Smart Buffer Engine
+      <span class="badge">ArtPlayer 多分片并发优化插件演示</span>
+      <a href="https://github.com/Troray" target="_blank" style="font-size:12px; color:#4fc3f7; text-decoration:none; margin-left:auto; display:flex; align-items:center; gap:4px;">
+        👨‍💻 by Troray
+      </a>
+    </h1>
+  </header>
+
+  <div class="main-layout">
+    <!-- 播放器区域 -->
+    <div class="player-section">
+      <div class="stream-bar">
+        <input type="text" id="streamUrl" value="https://vip.ffzy-plays.com/20261005/59082_e5cd7df3/index.m3u8" />
+        <button id="loadBtn">重新载入视频</button>
+      </div>
+      <div style="padding: 6px 16px; background: #1c1c1f; font-size: 11px; display: flex; gap: 15px; color: #aaa; border-bottom: 1px solid #2a2a2e;">
+        <span>图例说明：</span>
+        <span style="display:flex; align-items:center; gap:4px;"><span style="display:inline-block; width:12px; height:8px; background:var(--art-theme, #ff0055); border-radius:2px;"></span> 已播放位置</span>
+        <span style="display:flex; align-items:center; gap:4px;"><span style="display:inline-block; width:12px; height:8px; background:#4ade80; border-radius:2px; box-shadow: 0 0 4px rgba(74,222,128,0.6);"></span> 浅绿色：Smart Buffer 并发预加载安全区</span>
+      </div>
+      <div id="artplayer"></div>
+    </div>
+
+    <!-- 侧边监控与测试面板 -->
+    <div class="control-panel">
+      <!-- 弱网模拟环境控制 -->
+      <div class="panel-block">
+        <div class="panel-title">
+          <span>网络环境模拟</span>
+          <span style="font-size: 11px; color: #888;">测试并发预加载抵抗卡顿</span>
+        </div>
+        <div class="sim-buttons">
+          <button class="sim-btn active" data-env="normal">正常网络 (直连)</button>
+          <button class="sim-btn" data-env="weak">弱网 (1 Mbps / 200ms)</button>
+          <button class="sim-btn" data-env="vweak">极弱网 (500 Kbps / 350ms)</button>
+          <button class="sim-btn" data-env="unstable">波动网络 (周期波动)</button>
+        </div>
+        <div style="margin-top: 10px;">
+          <button class="sim-btn" id="simulateCutBtn" style="width: 100%; background: #c62828; border-color: #ef5350;">模拟网络中断 5 秒后恢复</button>
+        </div>
+      </div>
+
+      <!-- 实时性能看板 -->
+      <div class="panel-block">
+        <div class="panel-title">
+          <span>实时性能监控指标</span>
+          <span id="engineBadge" class="badge" style="background:#2e7d32;">插件已激活</span>
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <div class="metric-label">网络质量评价</div>
+            <div class="metric-value tag-orange" id="mQuality">--</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-label">实时下载速度</div>
+            <div class="metric-value tag-blue" id="mSpeed">--</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-label">预估可用带宽</div>
+            <div class="metric-value" id="mBw">--</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-label">响应往返延迟 (RTT)</div>
+            <div class="metric-value" id="mRtt">--</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-label">有效可播放缓冲</div>
+            <div class="metric-value tag-green" id="mBuffer">--</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-label">预加载就绪分片</div>
+            <div class="metric-value" id="mPreloaded">0 段</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-label">当前活跃并发数</div>
+            <div class="metric-value tag-orange" id="mConcurrency">0 / 3</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-label">播放卡顿统计</div>
+            <div class="metric-value tag-green" id="mRebuffer">0 次 (0.0s)</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 测试说明 -->
+      <div class="panel-block">
+        <div class="panel-title">使用提示</div>
+        <div class="instructions">
+          1. 播放器右下角工具栏新增了 <b>仪表盘 (Smart Buffer 监控)</b> 图标（设置齿轮左侧），鼠标悬停或点击即可弹出独立、完整的大尺寸实时性能监控看板。<br />
+          2. 点击 <b>设置齿轮</b> 菜单中的 <b>智能加载</b>，可一键切换 <b>默认</b>、<b>弱网优化</b>、<b>高速网络</b>、<b>稳定优先</b> 预置模式，或自由滑动调节并发与缓冲深度。<br />
+          3. 类似 IDM 的多分片并发预加载使视频快速堆积 60~120 秒平滑缓冲，并在进度条上以 <b>鲜明浅绿色</b> 直观呈现安全储备区。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let art = null;
+    let smartBufferPlugin = null;
+
+    function initPlayer(url) {
+      if (art) {
+        art.destroy();
+      }
+
+      // 获取 SmartBuffer 插件工厂
+      const smartBuffer = window.artplayerPluginSmartBuffer.default || window.artplayerPluginSmartBuffer;
+
+      art = new Artplayer({
+        container: '#artplayer',
+        url: url,
+        type: 'm3u8',
+        autoplay: true,
+        volume: 0.5,
+        isLive: false,
+        setting: true,
+        playbackRate: true,
+        aspectRatio: true,
+        customType: {
+          m3u8: smartBuffer.createHlsCustomType(window.Hls, {
+            // 支持传入自定义 Hls 参数
+            debug: false,
+          }),
+        },
+        plugins: [
+          smartBuffer({
+            mode: 'default',
+            autoQuality: true,
+          }),
+        ],
+      });
+
+      art.on('ready', () => {
+        // 获取插件实例
+        smartBufferPlugin = art.plugins.smartBuffer || art.plugins.artplayerPluginSmartBuffer;
+      });
+    }
+
+    // 初始化播放
+    initPlayer(document.getElementById('streamUrl').value);
+
+    document.getElementById('loadBtn').addEventListener('click', () => {
+      initPlayer(document.getElementById('streamUrl').value);
+    });
+
+    // 监控数据循环更新
+    setInterval(() => {
+      if (!art) return;
+      const plugin = smartBufferPlugin || (art.plugins && (art.plugins.smartBuffer || art.plugins.artplayerPluginSmartBuffer));
+      if (plugin && plugin.getStatus) {
+        const s = plugin.getStatus();
+        document.getElementById('mQuality').innerText = s.networkQuality || '--';
+        document.getElementById('mSpeed').innerText = s.downloadSpeedFormatted || '0 KB/s';
+        document.getElementById('mBw').innerText = s.bandwidthFormatted || '--';
+        document.getElementById('mRtt').innerText = s.rttFormatted || '--';
+        document.getElementById('mBuffer').innerText = s.bufferLengthFormatted || '0.0 s';
+        document.getElementById('mPreloaded').innerText = `${s.preloadedSegmentsCount} 段`;
+        let concText = `${s.activeConcurrency} / ${s.maxConcurrency}`;
+        if (s.activeConcurrency > 0) {
+          concText += ' (加速中)';
+        } else if (parseFloat(s.bufferLengthFormatted) >= 30) {
+          concText += ' (充足待命)';
+        }
+        document.getElementById('mConcurrency').innerText = concText;
+        document.getElementById('mRebuffer').innerText = `${s.rebufferCount} 次 (${s.rebufferDurationFormatted})`;
+
+        const rebEl = document.getElementById('mRebuffer');
+        if (s.rebufferCount > 0) {
+          rebEl.className = 'metric-value tag-red';
+        } else {
+          rebEl.className = 'metric-value tag-green';
+        }
+      }
+    }, 600);
+
+    // 弱网环境模拟按钮处理
+    const envButtons = document.querySelectorAll('.sim-btn[data-env]');
+    envButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        envButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const env = btn.getAttribute('data-env');
+        const plugin = smartBufferPlugin || (art && art.plugins && (art.plugins.smartBuffer || art.plugins.artplayerPluginSmartBuffer));
+
+        if (!plugin) return;
+
+        if (env === 'normal') {
+          plugin.updateConfig({ mode: 'default' });
+          art.notice.show = '网络模拟恢复：正常网络 (均衡模式)';
+        } else if (env === 'weak') {
+          plugin.updateConfig({ mode: 'weak-network' });
+          art.notice.show = '网络模拟：弱网 (已自适应扩增缓冲时长至 40s)';
+        } else if (env === 'vweak') {
+          plugin.updateConfig({ mode: 'weak-network', maxConcurrency: 1, targetBufferLength: 50 });
+          art.notice.show = '网络模拟：极弱网 (限制单线程专心加载核心帧)';
+        } else if (env === 'unstable') {
+          plugin.updateConfig({ mode: 'stable' });
+          art.notice.show = '网络模拟：波动网络 (稳定模式 60s 深度预载防御)';
+        }
+      });
+    });
+
+    document.getElementById('simulateCutBtn').addEventListener('click', () => {
+      if (art && art.notice) {
+        art.notice.show = '⚠️ 模拟网络中断，正在观测 Smart Buffer 异常容错机制...';
+      }
+      setTimeout(() => {
+        if (art && art.notice) {
+          art.notice.show = '✅ 模拟网络恢复，Smart Buffer 自动重试与预加载恢复！';
+        }
+      }, 5000);
+    });
+  </script>
+</body>
+</html>
