@@ -3,3 +3,4 @@ node_modules
 *.log
 coverage
 dist/*.map
+Smart Buffer Engine — 智能视频加载引擎开发规范.md

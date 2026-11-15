@@ -1,0 +1,5 @@
+dist/*.map
+*.map
+test/
+.DS_Store
+*.log
