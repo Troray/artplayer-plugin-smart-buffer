@@ -32,6 +32,10 @@
   ],
   "author": "Troray (https://github.com/Troray)",
   "homepage": "https://github.com/Troray/artplayer-plugin-smart-buffer#readme",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Troray/artplayer-plugin-smart-buffer.git"
