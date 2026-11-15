@@ -92,7 +92,7 @@ const art = new Artplayer({
 | `maxConcurrency` | `number` | `4` | `1 ~ 8` | 最大并发下载请求数（多线程预加载分片数） |
 | `targetBufferLength` | `number` | `30` | `5 ~ 120` | 目标缓冲时长（秒），达到后自动暂停远端预载 |
 | `maxBufferLength` | `number` | `80` | `10 ~ 300` | 最大缓冲上限（秒） |
-| `maxPreloadSegments` | `number` | `6` | `1 ~ 15` | 单次预加载最多排队的分片数量 |
+| `maxPreloadSegments` | `number` | `6` | `1 ~ 20` | 单次预加载最多排队的分片数量 |
 | `maxCacheSizeMB` | `number` | `150` | `20 ~ 1000` | 内存中允许保留的最大分片数据缓存（MB） |
 | `autoQuality` | `boolean` | `true` | `true / false` | 是否根据网络吞吐量自动决策 M3U8 清晰度 |
 | `qualitySafetyFactor` | `number` | `0.75` | `0.3 ~ 1.0` | 画质选择安全系数（目标码率 $\le$ 估算带宽 $\times$ 系数） |

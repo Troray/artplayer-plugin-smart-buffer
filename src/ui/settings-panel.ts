@@ -200,7 +200,7 @@ export class SettingsPanel {
             {
               html: '最大预加载分片数',
               tooltip: `${this.engine.getConfig().maxPreloadSegments} 段`,
-              range: [this.engine.getConfig().maxPreloadSegments, 1, 10, 1],
+              range: [this.engine.getConfig().maxPreloadSegments, 1, 20, 1],
               onChange: (item: any) => {
                 const val = Number(item.range[0]);
                 this.engine.updateConfig({ maxPreloadSegments: val });

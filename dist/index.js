@@ -205,7 +205,7 @@ var ConfigManager = class {
       sanitized.targetBufferLength,
       Math.min(300, Math.floor(cfg.maxBufferLength || 60))
     );
-    sanitized.maxPreloadSegments = Math.max(1, Math.min(12, Math.floor(cfg.maxPreloadSegments || 4)));
+    sanitized.maxPreloadSegments = Math.max(1, Math.min(20, Math.floor(cfg.maxPreloadSegments || 4)));
     sanitized.maxCacheSizeMB = Math.max(20, Math.min(1e3, Math.floor(cfg.maxCacheSizeMB || 100)));
     sanitized.autoQuality = Boolean(cfg.autoQuality);
     sanitized.qualitySafetyFactor = Math.max(0.3, Math.min(1, Number(cfg.qualitySafetyFactor) || 0.75));
@@ -2389,7 +2389,7 @@ var SettingsPanel = class {
             {
               html: "\u6700\u5927\u9884\u52A0\u8F7D\u5206\u7247\u6570",
               tooltip: `${this.engine.getConfig().maxPreloadSegments} \u6BB5`,
-              range: [this.engine.getConfig().maxPreloadSegments, 1, 10, 1],
+              range: [this.engine.getConfig().maxPreloadSegments, 1, 20, 1],
               onChange: (item) => {
                 const val = Number(item.range[0]);
                 this.engine.updateConfig({ maxPreloadSegments: val });

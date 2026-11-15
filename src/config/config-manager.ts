@@ -102,7 +102,7 @@ export class ConfigManager {
       Math.min(300, Math.floor(cfg.maxBufferLength || 60))
     );
 
-    sanitized.maxPreloadSegments = Math.max(1, Math.min(12, Math.floor(cfg.maxPreloadSegments || 4)));
+    sanitized.maxPreloadSegments = Math.max(1, Math.min(20, Math.floor(cfg.maxPreloadSegments || 4)));
     sanitized.maxCacheSizeMB = Math.max(20, Math.min(1000, Math.floor(cfg.maxCacheSizeMB || 100)));
 
     sanitized.autoQuality = Boolean(cfg.autoQuality);

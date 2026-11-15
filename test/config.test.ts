@@ -49,12 +49,14 @@ describe('ConfigManager', () => {
       maxConcurrency: 99,
       targetBufferLength: 2,
       maxBufferLength: 10,
+      maxPreloadSegments: 99,
       qualitySafetyFactor: 1.5,
     });
     const cfg = manager.getConfig();
     expect(cfg.minConcurrency).toBe(1);
     expect(cfg.maxConcurrency).toBe(8); // Capped at safe maximum 8
     expect(cfg.targetBufferLength).toBe(5); // Minimum 5s
+    expect(cfg.maxPreloadSegments).toBe(20); // Capped at safe maximum 20
     expect(cfg.qualitySafetyFactor).toBe(1.0); // Capped at 1.0
   });
 

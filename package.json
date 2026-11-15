@@ -1,6 +1,6 @@
 {
   "name": "artplayer-plugin-smart-buffer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Smart video loading and concurrent buffer engine plugin for ArtPlayer",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
