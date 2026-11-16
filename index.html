@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
   <title>Smart Buffer Engine — 智能视频加载与弱网并发优化演示</title>
   <!-- ArtPlayer & hls.js CDN -->
   <script src="https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.js"></script>
@@ -59,6 +60,11 @@
       padding: 12px 16px;
       background: #232328;
       display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .stream-row {
+      display: flex;
       gap: 10px;
       align-items: center;
     }
@@ -66,19 +72,30 @@
       flex: 1;
       background: #141416;
       border: 1px solid #333;
-      padding: 6px 12px;
+      padding: 7px 12px;
       color: #fff;
       border-radius: 4px;
       font-size: 13px;
+    }
+    .stream-bar select {
+      background: #141416;
+      border: 1px solid #333;
+      padding: 7px 10px;
+      color: #fff;
+      border-radius: 4px;
+      font-size: 13px;
+      outline: none;
     }
     .stream-bar button {
       background: #1976d2;
       color: #fff;
       border: none;
-      padding: 6px 16px;
+      padding: 7px 16px;
       border-radius: 4px;
       cursor: pointer;
       font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
     }
     .stream-bar button:hover {
       background: #1565c0;
@@ -164,6 +181,26 @@
       line-height: 1.6;
       color: #aaa;
     }
+    .env-banner {
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .env-banner.warning {
+      background: rgba(255, 152, 0, 0.12);
+      border: 1px solid #ff9800;
+      color: #ffb74d;
+    }
+    .env-banner.success {
+      background: rgba(76, 175, 80, 0.12);
+      border: 1px solid #4caf50;
+      color: #81c784;
+    }
   </style>
 </head>
 <body>
@@ -171,18 +208,42 @@
     <h1>
       Smart Buffer Engine
       <span class="badge">ArtPlayer 多分片并发优化插件演示</span>
-      <a href="https://github.com/Troray" target="_blank" style="font-size:12px; color:#4fc3f7; text-decoration:none; margin-left:auto; display:flex; align-items:center; gap:4px;">
-        👨‍💻 by Troray
+      <a href="https://github.com/Troray/artplayer-plugin-smart-buffer" target="_blank" style="font-size:12px; color:#4fc3f7; text-decoration:none; margin-left:auto; display:flex; align-items:center; gap:4px;">
+        👨‍💻 by Troray (v1.1.0)
       </a>
     </h1>
   </header>
+
+  <!-- 环境检测与 CORS 状态横幅 -->
+  <div id="envNotice"></div>
 
   <div class="main-layout">
     <!-- 播放器区域 -->
     <div class="player-section">
       <div class="stream-bar">
-        <input type="text" id="streamUrl" value="https://vip.ffzy-plays.com/20261005/59082_e5cd7df3/index.m3u8" />
-        <button id="loadBtn">重新载入视频</button>
+        <!-- 视频源与预设 -->
+        <div class="stream-row">
+          <select id="presetSelect" title="切换测试视频源">
+            <option value="https://vip.ffzy-plays.com/20261005/59082_e5cd7df3/index.m3u8">预设 1: 影视综合源 (HLS 1080P)</option>
+            <option value="https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8">预设 2: Mux 官方测试源 (Big Buck Bunny HLS)</option>
+            <option value="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4">预设 3: Google 官方 MP4 视频 (测试 MP4 Range 并发预载)</option>
+            <option value="custom">输入自定义视频 URL...</option>
+          </select>
+          <input type="text" id="streamUrl" value="https://vip.ffzy-plays.com/20261005/59082_e5cd7df3/index.m3u8" placeholder="请输入视频 M3U8 / MP4 地址" />
+        </div>
+        <!-- 跨域与代理设置 -->
+        <div class="stream-row">
+          <label style="font-size:12px; color:#aaa; display:flex; align-items:center; gap:6px;">
+            <span>跨域代理方案：</span>
+            <select id="proxyModeSelect" style="color:#4fc3f7; font-weight:500;">
+              <option value="auto">自动探测 (本地环境优先走 /proxy)</option>
+              <option value="direct">直连访问 (不走代理)</option>
+              <option value="local">本地代理 (推荐: npm run serve 提供的 /proxy)</option>
+              <option value="public">公共代理 (免启动服务: corsproxy.io)</option>
+            </select>
+          </label>
+          <button id="loadBtn" style="margin-left:auto;">重新载入视频</button>
+        </div>
       </div>
       <div style="padding: 6px 16px; background: #1c1c1f; font-size: 11px; display: flex; gap: 15px; color: #aaa; border-bottom: 1px solid #2a2a2e;">
         <span>图例说明：</span>
@@ -255,11 +316,11 @@
 
       <!-- 测试说明 -->
       <div class="panel-block">
-        <div class="panel-title">使用提示</div>
+        <div class="panel-title">跨域与测试说明</div>
         <div class="instructions">
-          1. 播放器右下角工具栏新增了 <b>仪表盘 (Smart Buffer 监控)</b> 图标（设置齿轮左侧），鼠标悬停或点击即可弹出独立、完整的大尺寸实时性能监控看板。<br />
-          2. 点击 <b>设置齿轮</b> 菜单中的 <b>智能加载</b>，可一键切换 <b>默认</b>、<b>弱网优化</b>、<b>高速网络</b>、<b>稳定优先</b> 预置模式，或自由滑动调节并发与缓冲深度。<br />
-          3. 类似 IDM 的多分片并发预加载使视频快速堆积 60~120 秒平滑缓冲，并在进度条上以 <b>鲜明浅绿色</b> 直观呈现安全储备区。
+          1. <b>跨域解决方案</b>：终端运行 <code>npm run serve</code> 即可启动本地代理（自动为所有分片添加 CORS 头并绕过 Referer 防盗链）。<br />
+          2. <b>file:// 兼容</b>：如直接双击打开 html，可将代理切换为 <b>公共代理 (corsproxy.io)</b> 绕过同源限制。<br />
+          3. <b>0ms 秒开与伪头清洗</b>：插件自带 <code>stripTsHeader</code> 自动切除伪装 PNG/JPEG 伪头，并基于 <code>SegmentCache</code> 实现 0ms 瞬间交付。
         </div>
       </div>
     </div>
@@ -269,6 +330,74 @@
     let art = null;
     let smartBufferPlugin = null;
 
+    // 1. 环境检测与横幅渲染
+    function renderEnvNotice() {
+      const container = document.getElementById('envNotice');
+      if (!container) return;
+
+      if (window.location.protocol === 'file:') {
+        container.innerHTML = `
+          <div class="env-banner warning">
+            <span>⚠️ <b>当前处于 file:// 协议本地打开模式</b>：浏览器原生同源沙箱可能会拦截非白名单 CDN 的分片请求。若提示 CORS 错误，请在上方代理下拉框选择<b>「公共代理」</b>，或在终端执行 <code>npm run serve</code> 启动零配置本地代理测试服务。</span>
+            <span style="font-size:11px; white-space:nowrap; color:#ffcc80;">推荐: npm run serve</span>
+          </div>
+        `;
+      } else {
+        container.innerHTML = `
+          <div class="env-banner success">
+            <span>🟢 <b>本地 Web 服务已激活 (${window.location.host})</b>：内置 <code>/proxy</code> 流媒体 CORS 转发已就绪，所有跨域与防盗链限制已被透明穿透！</span>
+            <span style="font-size:11px; white-space:nowrap; color:#a5d6a7;">CORS 状态: 完全就绪</span>
+          </div>
+        `;
+      }
+    }
+    renderEnvNotice();
+
+    // 2. 跨域代理计算
+    function getResolvedProxyMode() {
+      const mode = document.getElementById('proxyModeSelect').value;
+      if (mode === 'auto') {
+        if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+          return 'local';
+        }
+        return 'direct';
+      }
+      return mode;
+    }
+
+    function getProxiedUrl(targetUrl) {
+      if (!targetUrl) return targetUrl;
+      const mode = getResolvedProxyMode();
+      if (mode === 'local') {
+        return `/proxy?url=${encodeURIComponent(targetUrl)}`;
+      }
+      if (mode === 'public') {
+        return `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`;
+      }
+      return targetUrl;
+    }
+
+    // 3. 自定义支持跨域代理的 Hls.js Loader
+    class CorsProxyHlsLoader extends (window.Hls?.DefaultConfig?.loader || class {}) {
+      load(context, config, callbacks) {
+        const originalUrl = context.url;
+        const mode = getResolvedProxyMode();
+        const fetchUrl = mode === 'direct' ? originalUrl : getProxiedUrl(originalUrl);
+
+        const wrappedCallbacks = {
+          ...callbacks,
+          onSuccess: (response, stats, ctx, networkDetails) => {
+            // 关键：保留原始 URL，使相对分片地址解析不发生偏移
+            response.url = originalUrl;
+            callbacks.onSuccess(response, stats, { ...ctx, url: originalUrl }, networkDetails);
+          },
+        };
+
+        super.load({ ...context, url: fetchUrl }, config, wrappedCallbacks);
+      }
+    }
+
+    // 4. 初始化播放器
     function initPlayer(url) {
       if (art) {
         art.destroy();
@@ -276,11 +405,22 @@
 
       // 获取 SmartBuffer 插件工厂
       const smartBuffer = window.artplayerPluginSmartBuffer.default || window.artplayerPluginSmartBuffer;
+      const proxyMode = getResolvedProxyMode();
+      const isM3u8 = url.includes('.m3u8') || url.includes('m3u8');
+
+      const hlsConfig = {
+        debug: false,
+      };
+
+      if (proxyMode !== 'direct') {
+        hlsConfig.pLoader = CorsProxyHlsLoader;
+        hlsConfig.loader = CorsProxyHlsLoader;
+      }
 
       art = new Artplayer({
         container: '#artplayer',
         url: url,
-        type: 'm3u8',
+        type: isM3u8 ? 'm3u8' : 'auto',
         autoplay: true,
         volume: 0.5,
         isLive: false,
@@ -288,33 +428,52 @@
         playbackRate: true,
         aspectRatio: true,
         customType: {
-          m3u8: smartBuffer.createHlsCustomType(window.Hls, {
-            // 支持传入自定义 Hls 参数
-            debug: false,
-          }),
+          m3u8: smartBuffer.createHlsCustomType(window.Hls, hlsConfig),
         },
         plugins: [
           smartBuffer({
             mode: 'default',
             autoQuality: true,
+            withCredentials: false,
+            // 跨域模式下将后台预载通道映射至代理
+            customFetcher: proxyMode !== 'direct' ? async (fragUrl, init) => {
+              const fetchUrl = getProxiedUrl(fragUrl);
+              return fetch(fetchUrl, init);
+            } : undefined,
           }),
         ],
       });
 
       art.on('ready', () => {
-        // 获取插件实例
         smartBufferPlugin = art.plugins.smartBuffer || art.plugins.artplayerPluginSmartBuffer;
       });
     }
 
-    // 初始化播放
-    initPlayer(document.getElementById('streamUrl').value);
+    // 预设选择切换
+    const presetSelect = document.getElementById('presetSelect');
+    const streamInput = document.getElementById('streamUrl');
 
-    document.getElementById('loadBtn').addEventListener('click', () => {
-      initPlayer(document.getElementById('streamUrl').value);
+    presetSelect.addEventListener('change', () => {
+      if (presetSelect.value !== 'custom') {
+        streamInput.value = presetSelect.value;
+        initPlayer(streamInput.value);
+      } else {
+        streamInput.focus();
+      }
     });
 
-    // 监控数据循环更新
+    document.getElementById('proxyModeSelect').addEventListener('change', () => {
+      initPlayer(streamInput.value);
+    });
+
+    document.getElementById('loadBtn').addEventListener('click', () => {
+      initPlayer(streamInput.value);
+    });
+
+    // 初始化运行
+    initPlayer(streamInput.value);
+
+    // 5. 性能看板监控循环
     setInterval(() => {
       if (!art) return;
       const plugin = smartBufferPlugin || (art.plugins && (art.plugins.smartBuffer || art.plugins.artplayerPluginSmartBuffer));
@@ -344,7 +503,7 @@
       }
     }, 600);
 
-    // 弱网环境模拟按钮处理
+    // 6. 弱网环境模拟按钮
     const envButtons = document.querySelectorAll('.sim-btn[data-env]');
     envButtons.forEach(btn => {
       btn.addEventListener('click', () => {

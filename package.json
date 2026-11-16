@@ -21,6 +21,7 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "serve": "node scripts/serve.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
