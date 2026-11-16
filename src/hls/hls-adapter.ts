@@ -23,6 +23,7 @@ export class HlsAdapter {
   private recoveryManager: RecoveryManager;
 
   private pollTimer: any = null;
+  private stallTimer: any = null;
   private videoListeners: Array<{ type: string; handler: EventListener }> = [];
 
   constructor(
@@ -118,10 +119,26 @@ export class HlsAdapter {
       this.onTick();
     };
 
+    const onWaitingOrStalled = () => {
+      this.handleStallStart();
+    };
+
+    const onPlaying = () => {
+      this.handleStallEnd();
+    };
+
+    const onPause = () => {
+      this.handleStallEnd();
+    };
+
     this.addVideoListener('timeupdate', onTimeUpdate);
     this.addVideoListener('seeking', onSeeking);
     this.addVideoListener('seeked', onSeeked);
     this.addVideoListener('play', onPlay);
+    this.addVideoListener('waiting', onWaitingOrStalled);
+    this.addVideoListener('stalled', onWaitingOrStalled);
+    this.addVideoListener('playing', onPlaying);
+    this.addVideoListener('pause', onPause);
 
     // Start background polling loop (every 600ms)
     this.pollTimer = setInterval(() => {
@@ -130,6 +147,8 @@ export class HlsAdapter {
   }
 
   public detach(): void {
+    this.handleStallEnd();
+
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -166,6 +185,56 @@ export class HlsAdapter {
     if (this.video) {
       this.video.addEventListener(type, handler);
       this.videoListeners.push({ type, handler });
+    }
+  }
+
+  private handleStallStart(): void {
+    if (this.stallTimer) return;
+    this.stallTimer = setTimeout(() => {
+      this.stallTimer = null;
+      this.checkBufferHoleAndNudge();
+    }, 1200);
+  }
+
+  private handleStallEnd(): void {
+    if (this.stallTimer) {
+      clearTimeout(this.stallTimer);
+      this.stallTimer = null;
+    }
+  }
+
+  /**
+   * 播放引擎空洞卡顿智能微跃（Buffer Hole Auto-Nudge）
+   * 当由于 MSE 帧时间戳断层或极微小空洞导致解码器在 waiting/stalled 锁死卡顿超过 1200ms 时，
+   * 自动微跃跳过断层，触发解码器恢复正常进帧。
+   */
+  public checkBufferHoleAndNudge(): void {
+    if (!this.video || this.video.paused || !this.config.enabled) return;
+
+    const currentTime = this.video.currentTime;
+    const buffered = this.video.buffered;
+    if (!buffered || buffered.length === 0) return;
+
+    // 寻找紧邻当前播放点之后的下一个已缓冲片段起始点
+    let nextRangeStart: number | null = null;
+    for (let i = 0; i < buffered.length; i++) {
+      const start = buffered.start(i);
+      if (start > currentTime) {
+        if (nextRangeStart === null || start < nextRangeStart) {
+          nextRangeStart = start;
+        }
+      }
+    }
+
+    if (nextRangeStart !== null) {
+      const gap = nextRangeStart - currentTime;
+      if (gap > 0 && gap <= 2.0) {
+        console.warn(`[SmartBuffer] 检测到缓冲空洞 (${gap.toFixed(2)}s)，执行自动微跃恢复播放`);
+        const targetTime = Math.min((this.video.duration || Infinity) - 0.1, nextRangeStart + 0.05);
+        this.video.currentTime = targetTime;
+        // 若跳转后仍卡顿，重新开启卡顿计时检测
+        this.handleStallStart();
+      }
     }
   }
 

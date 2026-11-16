@@ -151,4 +151,84 @@ describe('SegmentCache', () => {
     const notFound = cache.getByLevelAndSn(0, 43);
     expect(notFound).toBeUndefined();
   });
+
+  it('should detect if segments exist after a given timestamp (hole detection)', () => {
+    cache.put({
+      key: 'k1',
+      url: 'seg1.ts',
+      sn: 1,
+      level: 0,
+      startTime: 10,
+      duration: 5,
+      quality: 0,
+      size: 500,
+      data: new ArrayBuffer(500),
+      status: 'completed',
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now(),
+    });
+
+    expect(cache.hasSegmentAfter(0, 5)).toBe(true);  // startTime 10 >= 5
+    expect(cache.hasSegmentAfter(0, 10)).toBe(true); // startTime 10 >= 10
+    expect(cache.hasSegmentAfter(0, 15)).toBe(false); // no segment with startTime >= 15
+    expect(cache.hasSegmentAfter(1, 5)).toBe(false); // different level
+  });
+
+  it('should calculate merged continuous time ranges and preserve discrete buffer holes', () => {
+    expect(cache.getCachedTimeRanges()).toEqual([]);
+
+    // Segment 1: 0s ~ 4s
+    cache.put({
+      key: 's1',
+      url: 's1.ts',
+      sn: 1,
+      level: 0,
+      startTime: 0,
+      duration: 4,
+      quality: 0,
+      size: 500,
+      data: new ArrayBuffer(500),
+      status: 'completed',
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now(),
+    });
+
+    // Segment 2: 4s ~ 8s (contiguous with segment 1)
+    cache.put({
+      key: 's2',
+      url: 's2.ts',
+      sn: 2,
+      level: 0,
+      startTime: 4,
+      duration: 4,
+      quality: 0,
+      size: 500,
+      data: new ArrayBuffer(500),
+      status: 'completed',
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now(),
+    });
+
+    // Segment 4: 12s ~ 16s (missing segment 3 at 8s ~ 12s -> gap!)
+    cache.put({
+      key: 's4',
+      url: 's4.ts',
+      sn: 4,
+      level: 0,
+      startTime: 12,
+      duration: 4,
+      quality: 0,
+      size: 500,
+      data: new ArrayBuffer(500),
+      status: 'completed',
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now(),
+    });
+
+    const ranges = cache.getCachedTimeRanges();
+    expect(ranges).toEqual([
+      { start: 0, end: 8 },
+      { start: 12, end: 16 },
+    ]);
+  });
 });

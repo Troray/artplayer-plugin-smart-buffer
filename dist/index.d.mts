@@ -182,6 +182,10 @@ declare class NetworkMonitor {
     destroy(): void;
 }
 
+interface TimeRange {
+    start: number;
+    end: number;
+}
 declare class SegmentCache {
     private cache;
     private maxCacheSizeBytes;
@@ -214,6 +218,14 @@ declare class SegmentCache {
     getMaxCachedTime(): number;
     getCompletedCount(): number;
     clear(): void;
+    /**
+     * 检查在指定时间点之后是否存在已缓存就绪的分片（用于判断当前分片是否处于断层空洞中）
+     */
+    hasSegmentAfter(level: number, time: number): boolean;
+    /**
+     * 计算当前所有已完成分片的真实连续时间区间（合并重叠与邻接分片，识别离散断层空洞）
+     */
+    getCachedTimeRanges(): TimeRange[];
     private enforceLimit;
 }
 
@@ -330,6 +342,7 @@ interface ScheduledTask<T = any> {
 declare class PriorityTaskQueue {
     private queue;
     enqueue(task: ScheduledTask): void;
+    hasUrgentTask(): boolean;
     dequeue(): ScheduledTask | undefined;
     peek(): ScheduledTask | undefined;
     remove(id: string): ScheduledTask | undefined;
@@ -345,6 +358,7 @@ interface ActivePrefetchTask {
     promise: Promise<ArrayBuffer>;
     level: number;
     sn: number | string;
+    startTime: number;
     byteRange?: {
         start: number;
         end: number;
@@ -359,6 +373,8 @@ declare class PrefetchScheduler {
     private bufferManager;
     private queue;
     private activeTasks;
+    private rateLimitConcurrencyCap;
+    private consecutiveSuccesses;
     constructor(config: SmartBufferConfig, cache: SegmentCache, networkMonitor: NetworkMonitor, manifestObserver: ManifestObserver, recoveryManager: RecoveryManager, bufferManager: DynamicBufferManager);
     updateConfig(config: SmartBufferConfig): void;
     getActiveConcurrency(): number;
@@ -367,6 +383,10 @@ declare class PrefetchScheduler {
         start: number;
         end: number;
     }): ActivePrefetchTask | undefined;
+    getEffectiveConcurrency(): number;
+    getRateLimitConcurrencyCap(): number | null;
+    private onRateLimitEncountered;
+    private onDownloadSuccess;
     /**
      * Fetch a segment with specified priority.
      * If already cached, returns immediately.
@@ -418,12 +438,21 @@ declare class HlsAdapter {
     private bufferManager;
     private recoveryManager;
     private pollTimer;
+    private stallTimer;
     private videoListeners;
     constructor(config: SmartBufferConfig, cache: SegmentCache, networkMonitor: NetworkMonitor, recoveryManager: RecoveryManager, bufferManager: DynamicBufferManager);
     updateConfig(config: SmartBufferConfig): void;
     attach(hls: Hls, video: HTMLVideoElement): void;
     detach(): void;
     private addVideoListener;
+    private handleStallStart;
+    private handleStallEnd;
+    /**
+     * 播放引擎空洞卡顿智能微跃（Buffer Hole Auto-Nudge）
+     * 当由于 MSE 帧时间戳断层或极微小空洞导致解码器在 waiting/stalled 锁死卡顿超过 1200ms 时，
+     * 自动微跃跳过断层，触发解码器恢复正常进帧。
+     */
+    checkBufferHoleAndNudge(): void;
     private onTick;
     private onLevelSwitched;
     private onFragLoaded;
@@ -483,6 +512,8 @@ declare class ProgressBarTracker {
     constructor(art: Artplayer, engine: SmartBufferEngine);
     attach(): void;
     update(): void;
+    private clearChunks;
+    private renderChunks;
     destroy(): void;
 }
 
@@ -655,4 +686,4 @@ declare namespace artplayerPluginSmartBuffer {
 }
 declare const createHlsCustomType: (HlsClass?: any, customConfig?: Record<string, any>) => (video: HTMLVideoElement, url: string, art: Artplayer) => void;
 
-export { type ActivePrefetchTask, AdaptiveQualityController, type ConfigChangeListener, ConfigManager, DEFAULT_CONFIG, DynamicBufferManager, type EngineStatus, type FragmentInfo, HlsAdapter, ManifestObserver, type Mp4Chunk, Mp4RangeEngine, NetworkMonitor, type NetworkQuality, type NetworkStats, PRESET_CONFIGS, type PluginOptions, PrefetchScheduler, type PresetMode, PriorityTaskQueue, ProgressBarTracker, RTTDetector, RecoveryManager, type RetryOptions, type ScheduledTask, SegmentCache, type SegmentCacheItem, SettingsPanel, type SmartBufferConfig, SmartBufferEngine, type SmartBufferPluginInstance, SmartFragmentLoader, type SmartLoaderContextHolder, StatusCard, StatusControl, TaskPriority, ThroughputDetector, type ThroughputSample, artplayerPluginSmartBuffer, createHlsCustomType, createSmartFragmentLoader, artplayerPluginSmartBuffer as default, setGlobalEngineContext, stripTsHeader };
+export { type ActivePrefetchTask, AdaptiveQualityController, type ConfigChangeListener, ConfigManager, DEFAULT_CONFIG, DynamicBufferManager, type EngineStatus, type FragmentInfo, HlsAdapter, ManifestObserver, type Mp4Chunk, Mp4RangeEngine, NetworkMonitor, type NetworkQuality, type NetworkStats, PRESET_CONFIGS, type PluginOptions, PrefetchScheduler, type PresetMode, PriorityTaskQueue, ProgressBarTracker, RTTDetector, RecoveryManager, type RetryOptions, type ScheduledTask, SegmentCache, type SegmentCacheItem, SettingsPanel, type SmartBufferConfig, SmartBufferEngine, type SmartBufferPluginInstance, SmartFragmentLoader, type SmartLoaderContextHolder, StatusCard, StatusControl, TaskPriority, ThroughputDetector, type ThroughputSample, type TimeRange, artplayerPluginSmartBuffer, createHlsCustomType, createSmartFragmentLoader, artplayerPluginSmartBuffer as default, setGlobalEngineContext, stripTsHeader };

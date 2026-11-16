@@ -13,6 +13,7 @@ export interface ActivePrefetchTask {
   promise: Promise<ArrayBuffer>;
   level: number;
   sn: number | string;
+  startTime: number;
   byteRange?: { start: number; end: number };
 }
 
@@ -26,6 +27,10 @@ export class PrefetchScheduler {
 
   private queue: PriorityTaskQueue = new PriorityTaskQueue();
   private activeTasks: Map<string, ActivePrefetchTask> = new Map();
+
+  // 自适应限流与 429 熔断降级状态
+  private rateLimitConcurrencyCap: number | null = null;
+  private consecutiveSuccesses = 0;
 
   constructor(
     config: SmartBufferConfig,
@@ -74,6 +79,52 @@ export class PrefetchScheduler {
       }
     }
     return undefined;
+  }
+
+  public getEffectiveConcurrency(): number {
+    let conc = this.config.dynamicConcurrency
+      ? this.bufferManager.getEffectiveConcurrency()
+      : this.config.maxConcurrency;
+
+    if (this.rateLimitConcurrencyCap !== null) {
+      conc = Math.min(conc, this.rateLimitConcurrencyCap);
+    }
+    return Math.max(1, conc);
+  }
+
+  public getRateLimitConcurrencyCap(): number | null {
+    return this.rateLimitConcurrencyCap;
+  }
+
+  private onRateLimitEncountered(status: number): void {
+    this.consecutiveSuccesses = 0;
+    const currentCap = this.rateLimitConcurrencyCap || this.config.maxConcurrency;
+    const reduced = Math.max(2, Math.floor(currentCap / 2));
+    this.rateLimitConcurrencyCap = reduced;
+    console.warn(
+      `[SmartBuffer:Scheduler] 触发 CDN 限流 (HTTP ${status})，自适应熔断降级并发至 ${reduced} 线程`
+    );
+  }
+
+  private onDownloadSuccess(): void {
+    this.recoveryManager.recordSuccess();
+    this.consecutiveSuccesses++;
+
+    // 慢启动恢复 (AIMD)：连续稳定下载 8 个分片后保守尝试递增 1 个并发
+    if (this.rateLimitConcurrencyCap !== null && this.consecutiveSuccesses >= 8) {
+      this.consecutiveSuccesses = 0;
+      this.rateLimitConcurrencyCap = Math.min(
+        this.config.maxConcurrency,
+        this.rateLimitConcurrencyCap + 1
+      );
+      console.log(
+        `[SmartBuffer:Scheduler] 连续稳定下载，慢启动恢复并发至 ${this.rateLimitConcurrencyCap} 线程`
+      );
+      if (this.rateLimitConcurrencyCap >= this.config.maxConcurrency) {
+        this.rateLimitConcurrencyCap = null;
+        console.log('[SmartBuffer:Scheduler] 并发配额已完全恢复至用户设定值');
+      }
+    }
   }
 
   /**
@@ -132,14 +183,8 @@ export class PrefetchScheduler {
       return;
     }
 
-    // Effective concurrency: use maxConcurrency directly when user desires, or dynamic concurrency
-    const effectiveConcurrency = this.config.dynamicConcurrency ? concurrency : this.config.maxConcurrency;
-
-    // How many more tasks can we launch?
-    const availableSlots = effectiveConcurrency - this.activeTasks.size;
-    if (availableSlots <= 0) {
-      return;
-    }
+    // Effective concurrency: use maxConcurrency directly when user desires, or dynamic concurrency, constrained by rate limit
+    const effectiveConcurrency = this.getEffectiveConcurrency();
 
     const upcoming = this.manifestObserver.getUncachedCandidateFragments(
       currentTime,
@@ -159,8 +204,33 @@ export class PrefetchScheduler {
         continue;
       }
 
-      // Assign priority based on proximity to playback
-      const priority = i === 0 ? TaskPriority.HIGH : TaskPriority.NORMAL;
+      // 优先级判定：
+      // LEVEL 1 (URGENT): 紧邻当前播放点 (<10s) 或第0个候选片，或者检测到断层空洞（即本分片未就绪但后续已有分片完成）
+      const isNear = (frag.start - currentTime < 10) || i === 0;
+      const isHole = this.cache.hasSegmentAfter(frag.level, frag.end);
+      const priority = (isNear || isHole) ? TaskPriority.HIGH : TaskPriority.NORMAL;
+
+      // 若为紧急任务且当前并发槽位已被占满，抢占/终止最远端的 LEVEL 2 (NORMAL/LOW) 任务以腾出槽位
+      if (priority <= TaskPriority.HIGH && this.activeTasks.size >= effectiveConcurrency) {
+        let furthestKey: string | null = null;
+        let furthestStartTime = -Infinity;
+        for (const [aKey, active] of this.activeTasks.entries()) {
+          if (active.priority > TaskPriority.HIGH && active.startTime > currentTime + 15) {
+            if (active.startTime > furthestStartTime) {
+              furthestStartTime = active.startTime;
+              furthestKey = aKey;
+            }
+          }
+        }
+        if (furthestKey) {
+          const toAbort = this.activeTasks.get(furthestKey);
+          if (toAbort) {
+            toAbort.abortController.abort();
+            this.activeTasks.delete(furthestKey);
+            this.cache.remove(furthestKey);
+          }
+        }
+      }
 
       // Register into queue if not already
       const abortController = new AbortController();
@@ -211,6 +281,13 @@ export class PrefetchScheduler {
 
   private drainQueue(maxConcurrency: number): void {
     while (this.activeTasks.size < maxConcurrency && this.queue.size() > 0) {
+      // 调度逻辑：若队列中存在紧邻或空洞等紧急任务 (LEVEL 1)，暂停/阻塞所有常规预加载 (LEVEL 2)
+      const nextTask = this.queue.peek();
+      if (!nextTask) break;
+      if (this.queue.hasUrgentTask() && nextTask.priority > TaskPriority.HIGH) {
+        break;
+      }
+
       const task = this.queue.dequeue();
       if (!task) break;
 
@@ -280,12 +357,18 @@ export class PrefetchScheduler {
             } else if (result && typeof (result as Response).arrayBuffer === 'function') {
               const res = result as Response;
               if (!res.ok && res.status !== 206) {
+                if (res.status === 429 || res.status === 503) {
+                  this.onRateLimitEncountered(res.status);
+                }
                 const isRecoverable = this.recoveryManager.isRecoverableError(res.status);
                 if (!isRecoverable || attempts >= maxRetries - 1) {
                   throw new Error(`HTTP ${res.status} ${res.statusText}`);
                 }
                 attempts++;
-                const delay = this.recoveryManager.getBackoffDelay(attempts);
+                const delay =
+                  res.status === 429 || res.status === 503
+                    ? Math.min(5000, 1000 * Math.pow(2, attempts)) + Math.random() * 500
+                    : this.recoveryManager.getBackoffDelay(attempts);
                 await new Promise((r) => setTimeout(r, delay));
                 continue;
               }
@@ -303,12 +386,18 @@ export class PrefetchScheduler {
             tfirst = performance.now();
 
             if (!response.ok && response.status !== 206) {
+              if (response.status === 429 || response.status === 503) {
+                this.onRateLimitEncountered(response.status);
+              }
               const isRecoverable = this.recoveryManager.isRecoverableError(response.status);
               if (!isRecoverable || attempts >= maxRetries - 1) {
                 throw new Error(`HTTP ${response.status} ${response.statusText}`);
               }
               attempts++;
-              const delay = this.recoveryManager.getBackoffDelay(attempts);
+              const delay =
+                response.status === 429 || response.status === 503
+                  ? Math.min(5000, 1000 * Math.pow(2, attempts)) + Math.random() * 500
+                  : this.recoveryManager.getBackoffDelay(attempts);
               await new Promise((res) => setTimeout(res, delay));
               continue;
             }
@@ -329,7 +418,7 @@ export class PrefetchScheduler {
 
           // Record network stats
           this.networkMonitor.recordDownload(cleanBuffer.byteLength, durationMs, rttMs);
-          this.recoveryManager.recordSuccess();
+          this.onDownloadSuccess();
 
           return cleanBuffer;
         } catch (error: any) {
@@ -342,13 +431,21 @@ export class PrefetchScheduler {
           this.recoveryManager.recordFailure();
           this.networkMonitor.recordFailure();
 
+          const errorMsg = error?.message || '';
+          if (errorMsg.includes('429') || errorMsg.includes('503')) {
+            this.onRateLimitEncountered(errorMsg.includes('429') ? 429 : 503);
+          }
+
           const isRecoverable = this.recoveryManager.isRecoverableError(error);
           if (!isRecoverable || attempts >= maxRetries) {
             this.cache.markFailed(key);
             throw error;
           }
 
-          const delay = this.recoveryManager.getBackoffDelay(attempts);
+          const delay =
+            errorMsg.includes('429') || errorMsg.includes('503')
+              ? Math.min(5000, 1000 * Math.pow(2, attempts)) + Math.random() * 500
+              : this.recoveryManager.getBackoffDelay(attempts);
           await new Promise((res) => setTimeout(res, delay));
         }
       }
@@ -364,6 +461,7 @@ export class PrefetchScheduler {
       promise: downloadPromise,
       level: frag.level,
       sn: frag.sn,
+      startTime: frag.start,
       byteRange: frag.byteRange,
     });
 
@@ -373,9 +471,7 @@ export class PrefetchScheduler {
     } finally {
       this.activeTasks.delete(key);
       // Immediately schedule next queued task to keep all concurrency slots filled
-      const effectiveConcurrency = this.config.dynamicConcurrency
-        ? this.bufferManager.getEffectiveConcurrency()
-        : this.config.maxConcurrency;
+      const effectiveConcurrency = this.getEffectiveConcurrency();
       this.drainQueue(effectiveConcurrency);
     }
   }

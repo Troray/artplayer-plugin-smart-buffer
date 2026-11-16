@@ -110,4 +110,62 @@ describe('PriorityTaskQueue', () => {
     expect(queue.size()).toBe(0);
     expect(controller.signal.aborted).toBe(true);
   });
+
+  it('should sort tasks with the same priority by startTime ascending (earlier holes first)', () => {
+    const taskLater: ScheduledTask = {
+      id: 'task-later',
+      priority: TaskPriority.HIGH,
+      sn: 5,
+      level: 0,
+      startTime: 20,
+      createdAt: 1,
+      abortController: new AbortController(),
+      execute: async () => {},
+    };
+
+    const taskEarlier: ScheduledTask = {
+      id: 'task-earlier',
+      priority: TaskPriority.HIGH,
+      sn: 2,
+      level: 0,
+      startTime: 8,
+      createdAt: 2,
+      abortController: new AbortController(),
+      execute: async () => {},
+    };
+
+    queue.enqueue(taskLater);
+    queue.enqueue(taskEarlier);
+
+    expect(queue.dequeue()?.id).toBe('task-earlier');
+    expect(queue.dequeue()?.id).toBe('task-later');
+  });
+
+  it('should correctly report hasUrgentTask()', () => {
+    expect(queue.hasUrgentTask()).toBe(false);
+
+    queue.enqueue({
+      id: 'task-normal',
+      priority: TaskPriority.NORMAL,
+      sn: 10,
+      level: 0,
+      startTime: 50,
+      createdAt: 1,
+      abortController: new AbortController(),
+      execute: async () => {},
+    });
+    expect(queue.hasUrgentTask()).toBe(false);
+
+    queue.enqueue({
+      id: 'task-high',
+      priority: TaskPriority.HIGH,
+      sn: 2,
+      level: 0,
+      startTime: 10,
+      createdAt: 2,
+      abortController: new AbortController(),
+      execute: async () => {},
+    });
+    expect(queue.hasUrgentTask()).toBe(true);
+  });
 });

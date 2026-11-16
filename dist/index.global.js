@@ -705,6 +705,46 @@ var artplayerPluginSmartBuffer = (() => {
       this.cache.clear();
       this.currentSizeBytes = 0;
     }
+    /**
+     * 检查在指定时间点之后是否存在已缓存就绪的分片（用于判断当前分片是否处于断层空洞中）
+     */
+    hasSegmentAfter(level, time) {
+      for (const item of this.cache.values()) {
+        if (item.level === level && item.status === "completed" && typeof item.startTime === "number" && item.startTime >= time) {
+          return true;
+        }
+      }
+      return false;
+    }
+    /**
+     * 计算当前所有已完成分片的真实连续时间区间（合并重叠与邻接分片，识别离散断层空洞）
+     */
+    getCachedTimeRanges() {
+      const rawRanges = [];
+      for (const item of this.cache.values()) {
+        if (item.status === "completed" && typeof item.startTime === "number" && typeof item.duration === "number" && item.duration > 0) {
+          rawRanges.push({
+            start: item.startTime,
+            end: item.startTime + item.duration
+          });
+        }
+      }
+      if (rawRanges.length === 0) return [];
+      rawRanges.sort((a, b) => a.start - b.start);
+      const merged = [];
+      let current = { start: rawRanges[0].start, end: rawRanges[0].end };
+      for (let i = 1; i < rawRanges.length; i++) {
+        const next = rawRanges[i];
+        if (next.start <= current.end + 0.25) {
+          current.end = Math.max(current.end, next.end);
+        } else {
+          merged.push({ ...current });
+          current = { start: next.start, end: next.end };
+        }
+      }
+      merged.push(current);
+      return merged;
+    }
     enforceLimit() {
       if (this.currentSizeBytes <= this.maxCacheSizeBytes) return;
       const items = Array.from(this.cache.entries()).filter(([_, item]) => item.status === "completed" && item.data).sort((a, b) => a[1].lastAccessedAt - b[1].lastAccessedAt);
@@ -38412,12 +38452,17 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
       this.queue = [];
     }
     enqueue(task) {
-      const index = this.queue.findIndex((item) => item.priority > task.priority);
+      const index = this.queue.findIndex(
+        (item) => item.priority > task.priority || item.priority === task.priority && item.startTime > task.startTime
+      );
       if (index === -1) {
         this.queue.push(task);
       } else {
         this.queue.splice(index, 0, task);
       }
+    }
+    hasUrgentTask() {
+      return this.queue.some((task) => task.priority <= 1 /* HIGH */);
     }
     dequeue() {
       return this.queue.shift();
@@ -38652,6 +38697,9 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
     constructor(config, cache, networkMonitor, manifestObserver, recoveryManager, bufferManager) {
       this.queue = new PriorityTaskQueue();
       this.activeTasks = /* @__PURE__ */ new Map();
+      // 自适应限流与 429 熔断降级状态
+      this.rateLimitConcurrencyCap = null;
+      this.consecutiveSuccesses = 0;
       this.config = config;
       this.cache = cache;
       this.networkMonitor = networkMonitor;
@@ -38678,6 +38726,43 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
         }
       }
       return void 0;
+    }
+    getEffectiveConcurrency() {
+      let conc = this.config.dynamicConcurrency ? this.bufferManager.getEffectiveConcurrency() : this.config.maxConcurrency;
+      if (this.rateLimitConcurrencyCap !== null) {
+        conc = Math.min(conc, this.rateLimitConcurrencyCap);
+      }
+      return Math.max(1, conc);
+    }
+    getRateLimitConcurrencyCap() {
+      return this.rateLimitConcurrencyCap;
+    }
+    onRateLimitEncountered(status2) {
+      this.consecutiveSuccesses = 0;
+      const currentCap = this.rateLimitConcurrencyCap || this.config.maxConcurrency;
+      const reduced = Math.max(2, Math.floor(currentCap / 2));
+      this.rateLimitConcurrencyCap = reduced;
+      console.warn(
+        `[SmartBuffer:Scheduler] \u89E6\u53D1 CDN \u9650\u6D41 (HTTP ${status2})\uFF0C\u81EA\u9002\u5E94\u7194\u65AD\u964D\u7EA7\u5E76\u53D1\u81F3 ${reduced} \u7EBF\u7A0B`
+      );
+    }
+    onDownloadSuccess() {
+      this.recoveryManager.recordSuccess();
+      this.consecutiveSuccesses++;
+      if (this.rateLimitConcurrencyCap !== null && this.consecutiveSuccesses >= 8) {
+        this.consecutiveSuccesses = 0;
+        this.rateLimitConcurrencyCap = Math.min(
+          this.config.maxConcurrency,
+          this.rateLimitConcurrencyCap + 1
+        );
+        console.log(
+          `[SmartBuffer:Scheduler] \u8FDE\u7EED\u7A33\u5B9A\u4E0B\u8F7D\uFF0C\u6162\u542F\u52A8\u6062\u590D\u5E76\u53D1\u81F3 ${this.rateLimitConcurrencyCap} \u7EBF\u7A0B`
+        );
+        if (this.rateLimitConcurrencyCap >= this.config.maxConcurrency) {
+          this.rateLimitConcurrencyCap = null;
+          console.log("[SmartBuffer:Scheduler] \u5E76\u53D1\u914D\u989D\u5DF2\u5B8C\u5168\u6062\u590D\u81F3\u7528\u6237\u8BBE\u5B9A\u503C");
+        }
+      }
     }
     /**
      * Fetch a segment with specified priority.
@@ -38714,11 +38799,7 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
       if (currentBuffer >= maxHorizon) {
         return;
       }
-      const effectiveConcurrency = this.config.dynamicConcurrency ? concurrency : this.config.maxConcurrency;
-      const availableSlots = effectiveConcurrency - this.activeTasks.size;
-      if (availableSlots <= 0) {
-        return;
-      }
+      const effectiveConcurrency = this.getEffectiveConcurrency();
       const upcoming = this.manifestObserver.getUncachedCandidateFragments(
         currentTime,
         maxHorizon,
@@ -38734,7 +38815,29 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
         if (this.cache.has(key) || this.activeTasks.has(key)) {
           continue;
         }
-        const priority = i === 0 ? 1 /* HIGH */ : 2 /* NORMAL */;
+        const isNear = frag.start - currentTime < 10 || i === 0;
+        const isHole = this.cache.hasSegmentAfter(frag.level, frag.end);
+        const priority = isNear || isHole ? 1 /* HIGH */ : 2 /* NORMAL */;
+        if (priority <= 1 /* HIGH */ && this.activeTasks.size >= effectiveConcurrency) {
+          let furthestKey = null;
+          let furthestStartTime = -Infinity;
+          for (const [aKey, active] of this.activeTasks.entries()) {
+            if (active.priority > 1 /* HIGH */ && active.startTime > currentTime + 15) {
+              if (active.startTime > furthestStartTime) {
+                furthestStartTime = active.startTime;
+                furthestKey = aKey;
+              }
+            }
+          }
+          if (furthestKey) {
+            const toAbort = this.activeTasks.get(furthestKey);
+            if (toAbort) {
+              toAbort.abortController.abort();
+              this.activeTasks.delete(furthestKey);
+              this.cache.remove(furthestKey);
+            }
+          }
+        }
         const abortController = new AbortController();
         const task = {
           id: key,
@@ -38771,6 +38874,11 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
     }
     drainQueue(maxConcurrency) {
       while (this.activeTasks.size < maxConcurrency && this.queue.size() > 0) {
+        const nextTask = this.queue.peek();
+        if (!nextTask) break;
+        if (this.queue.hasUrgentTask() && nextTask.priority > 1 /* HIGH */) {
+          break;
+        }
         const task = this.queue.dequeue();
         if (!task) break;
         if (this.activeTasks.has(task.id) || this.cache.has(task.id)) {
@@ -38823,12 +38931,15 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
               } else if (result && typeof result.arrayBuffer === "function") {
                 const res = result;
                 if (!res.ok && res.status !== 206) {
+                  if (res.status === 429 || res.status === 503) {
+                    this.onRateLimitEncountered(res.status);
+                  }
                   const isRecoverable = this.recoveryManager.isRecoverableError(res.status);
                   if (!isRecoverable || attempts >= maxRetries - 1) {
                     throw new Error(`HTTP ${res.status} ${res.statusText}`);
                   }
                   attempts++;
-                  const delay = this.recoveryManager.getBackoffDelay(attempts);
+                  const delay = res.status === 429 || res.status === 503 ? Math.min(5e3, 1e3 * Math.pow(2, attempts)) + Math.random() * 500 : this.recoveryManager.getBackoffDelay(attempts);
                   await new Promise((r) => setTimeout(r, delay));
                   continue;
                 }
@@ -38844,12 +38955,15 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
               });
               tfirst = performance.now();
               if (!response.ok && response.status !== 206) {
+                if (response.status === 429 || response.status === 503) {
+                  this.onRateLimitEncountered(response.status);
+                }
                 const isRecoverable = this.recoveryManager.isRecoverableError(response.status);
                 if (!isRecoverable || attempts >= maxRetries - 1) {
                   throw new Error(`HTTP ${response.status} ${response.statusText}`);
                 }
                 attempts++;
-                const delay = this.recoveryManager.getBackoffDelay(attempts);
+                const delay = response.status === 429 || response.status === 503 ? Math.min(5e3, 1e3 * Math.pow(2, attempts)) + Math.random() * 500 : this.recoveryManager.getBackoffDelay(attempts);
                 await new Promise((res) => setTimeout(res, delay));
                 continue;
               }
@@ -38864,7 +38978,7 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
             }
             this.cache.markCompleted(key, cleanBuffer);
             this.networkMonitor.recordDownload(cleanBuffer.byteLength, durationMs, rttMs);
-            this.recoveryManager.recordSuccess();
+            this.onDownloadSuccess();
             return cleanBuffer;
           } catch (error) {
             if (abortController.signal.aborted) {
@@ -38874,12 +38988,16 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
             attempts++;
             this.recoveryManager.recordFailure();
             this.networkMonitor.recordFailure();
+            const errorMsg = error?.message || "";
+            if (errorMsg.includes("429") || errorMsg.includes("503")) {
+              this.onRateLimitEncountered(errorMsg.includes("429") ? 429 : 503);
+            }
             const isRecoverable = this.recoveryManager.isRecoverableError(error);
             if (!isRecoverable || attempts >= maxRetries) {
               this.cache.markFailed(key);
               throw error;
             }
-            const delay = this.recoveryManager.getBackoffDelay(attempts);
+            const delay = errorMsg.includes("429") || errorMsg.includes("503") ? Math.min(5e3, 1e3 * Math.pow(2, attempts)) + Math.random() * 500 : this.recoveryManager.getBackoffDelay(attempts);
             await new Promise((res) => setTimeout(res, delay));
           }
         }
@@ -38893,6 +39011,7 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
         promise: downloadPromise,
         level: frag.level,
         sn: frag.sn,
+        startTime: frag.start,
         byteRange: frag.byteRange
       });
       try {
@@ -38900,7 +39019,7 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
         return buffer;
       } finally {
         this.activeTasks.delete(key);
-        const effectiveConcurrency = this.config.dynamicConcurrency ? this.bufferManager.getEffectiveConcurrency() : this.config.maxConcurrency;
+        const effectiveConcurrency = this.getEffectiveConcurrency();
         this.drainQueue(effectiveConcurrency);
       }
     }
@@ -39011,6 +39130,7 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
   var HlsAdapter = class {
     constructor(config, cache, networkMonitor, recoveryManager, bufferManager) {
       this.pollTimer = null;
+      this.stallTimer = null;
       this.videoListeners = [];
       this.onLevelSwitched = (event, data) => {
         if (typeof data.level === "number") {
@@ -39133,15 +39253,29 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
       const onPlay = () => {
         this.onTick();
       };
+      const onWaitingOrStalled = () => {
+        this.handleStallStart();
+      };
+      const onPlaying = () => {
+        this.handleStallEnd();
+      };
+      const onPause = () => {
+        this.handleStallEnd();
+      };
       this.addVideoListener("timeupdate", onTimeUpdate);
       this.addVideoListener("seeking", onSeeking);
       this.addVideoListener("seeked", onSeeked);
       this.addVideoListener("play", onPlay);
+      this.addVideoListener("waiting", onWaitingOrStalled);
+      this.addVideoListener("stalled", onWaitingOrStalled);
+      this.addVideoListener("playing", onPlaying);
+      this.addVideoListener("pause", onPause);
       this.pollTimer = setInterval(() => {
         this.onTick();
       }, 600);
     }
     detach() {
+      this.handleStallEnd();
       if (this.pollTimer) {
         clearInterval(this.pollTimer);
         this.pollTimer = null;
@@ -39172,6 +39306,48 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
       if (this.video) {
         this.video.addEventListener(type, handler);
         this.videoListeners.push({ type, handler });
+      }
+    }
+    handleStallStart() {
+      if (this.stallTimer) return;
+      this.stallTimer = setTimeout(() => {
+        this.stallTimer = null;
+        this.checkBufferHoleAndNudge();
+      }, 1200);
+    }
+    handleStallEnd() {
+      if (this.stallTimer) {
+        clearTimeout(this.stallTimer);
+        this.stallTimer = null;
+      }
+    }
+    /**
+     * 播放引擎空洞卡顿智能微跃（Buffer Hole Auto-Nudge）
+     * 当由于 MSE 帧时间戳断层或极微小空洞导致解码器在 waiting/stalled 锁死卡顿超过 1200ms 时，
+     * 自动微跃跳过断层，触发解码器恢复正常进帧。
+     */
+    checkBufferHoleAndNudge() {
+      if (!this.video || this.video.paused || !this.config.enabled) return;
+      const currentTime = this.video.currentTime;
+      const buffered = this.video.buffered;
+      if (!buffered || buffered.length === 0) return;
+      let nextRangeStart = null;
+      for (let i = 0; i < buffered.length; i++) {
+        const start = buffered.start(i);
+        if (start > currentTime) {
+          if (nextRangeStart === null || start < nextRangeStart) {
+            nextRangeStart = start;
+          }
+        }
+      }
+      if (nextRangeStart !== null) {
+        const gap = nextRangeStart - currentTime;
+        if (gap > 0 && gap <= 2) {
+          console.warn(`[SmartBuffer] \u68C0\u6D4B\u5230\u7F13\u51B2\u7A7A\u6D1E (${gap.toFixed(2)}s)\uFF0C\u6267\u884C\u81EA\u52A8\u5FAE\u8DC3\u6062\u590D\u64AD\u653E`);
+          const targetTime = Math.min((this.video.duration || Infinity) - 0.1, nextRangeStart + 0.05);
+          this.video.currentTime = targetTime;
+          this.handleStallStart();
+        }
       }
     }
     onTick() {
@@ -39352,7 +39528,7 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
     const style = document.createElement("style");
     style.id = PROGRESS_STYLE_ID;
     style.textContent = `
-    /* \u6D45\u7EFF\u8272 Smart Buffer \u9884\u52A0\u8F7D\u5B89\u5168\u533A\u8FDB\u5EA6\u6761 */
+    /* Smart Buffer \u9884\u52A0\u8F7D\u5206\u6BB5\u5E95\u8F68\u5BB9\u5668 */
     .art-video-player .art-control-progress-inner .art-progress-smart-preloaded,
     .art-video-player .art-progress .art-control-progress-inner .art-progress-smart-preloaded,
     .art-video-player .art-progress .art-progress-smart-preloaded {
@@ -39361,16 +39537,27 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
       top: 0 !important;
       bottom: 0 !important;
       height: 100% !important;
-      width: 0%;
-      background: #4ade80 !important; /* \u6E05\u6670\u9C9C\u660E\u7684\u6D45\u7EFF\u8272 (Tailwind Green 400) */
+      width: 100% !important;
+      background: transparent !important;
       z-index: 15 !important; /* \u9AD8\u4E8E\u539F\u751F loaded (10)\uFF0C\u4F4E\u4E8E played (20) */
       pointer-events: none !important;
       border-radius: 2px;
-      transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: 0 0 8px rgba(35, 158, 80, 0.7);
     }
 
-    /* \u539F\u751F loaded \u7F13\u51B2\u6761\u5728 Smart Buffer \u6FC0\u6D3B\u65F6\u540C\u6B65\u8BBE\u4E3A\u6D45\u7EFF\u8272\uFF0C\u5F7B\u5E95\u544A\u522B\u6C89\u95F7\u7070\u8272 */
+    /* \u79BB\u6563\u5206\u6BB5\u7F13\u5B58\u8272\u5757\uFF08\u771F\u5B9E\u5448\u73B0\u8FDE\u7EED\u7F13\u51B2\u4E0E\u65AD\u5C42\u7A7A\u6D1E\uFF09 */
+    .art-video-player .art-progress-smart-chunk {
+      position: absolute !important;
+      top: 0 !important;
+      bottom: 0 !important;
+      height: 100% !important;
+      background: #4ade80 !important; /* \u6E05\u6670\u9C9C\u660E\u7684\u6D45\u7EFF\u8272 (Tailwind Green 400) */
+      border-radius: 2px;
+      pointer-events: none !important;
+      box-shadow: 0 0 8px rgba(35, 158, 80, 0.7);
+      transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* \u539F\u751F loaded \u7F13\u51B2\u6761\u5728 Smart Buffer \u6FC0\u6D3B\u65F6\u8BBE\u4E3A\u534A\u900F\u660E\u6D45\u7EFF\u8272 */
     .art-video-player.art-smart-buffer-enabled .art-progress-loaded {
       background-color: rgba(35, 158, 80, 0.5) !important;
     }
@@ -39437,7 +39624,7 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
         if (!this.preloadBar) return;
       }
       if (!this.engine.getConfig().enabled) {
-        this.preloadBar.style.width = "0%";
+        this.clearChunks();
         this.preloadBar.style.display = "none";
         if (this.art.template && this.art.template.$player) {
           this.art.template.$player.classList.remove("art-smart-buffer-enabled");
@@ -39452,28 +39639,68 @@ Schedule: ${scheduleItems.map((seg) => segmentToString(seg))} pos: ${this.timeli
       if (!video) return;
       const duration = video.duration || this.art.duration || 0;
       if (!duration || duration <= 0 || isNaN(duration) || !isFinite(duration)) {
-        this.preloadBar.style.width = "0%";
+        this.clearChunks();
         return;
       }
-      let maxBuffered = 0;
+      const allRanges = [];
       if (video.buffered && video.buffered.length > 0) {
         for (let i = 0; i < video.buffered.length; i++) {
           const start = video.buffered.start(i);
           const end = video.buffered.end(i);
-          if (video.currentTime >= start - 1 && video.currentTime <= end + 1) {
-            maxBuffered = Math.max(maxBuffered, end);
-          } else if (end > maxBuffered && start <= video.currentTime + 60) {
-            maxBuffered = Math.max(maxBuffered, end);
+          if (end > start) {
+            allRanges.push({ start, end });
           }
         }
-        if (maxBuffered === 0) {
-          maxBuffered = video.buffered.end(video.buffered.length - 1);
+      }
+      const cachedRanges = this.engine.segmentCache.getCachedTimeRanges();
+      allRanges.push(...cachedRanges);
+      if (allRanges.length === 0) {
+        this.clearChunks();
+        return;
+      }
+      allRanges.sort((a, b) => a.start - b.start);
+      const merged = [];
+      let cur = { start: allRanges[0].start, end: allRanges[0].end };
+      for (let i = 1; i < allRanges.length; i++) {
+        const next = allRanges[i];
+        if (next.start <= cur.end + 0.25) {
+          cur.end = Math.max(cur.end, next.end);
+        } else {
+          merged.push({ ...cur });
+          cur = { start: next.start, end: next.end };
         }
       }
-      const maxCached = this.engine.segmentCache.getMaxCachedTime();
-      const furthestPreload = Math.max(maxBuffered, maxCached);
-      const pct = Math.min(100, Math.max(0, furthestPreload / duration * 100));
-      this.preloadBar.style.width = `${pct.toFixed(2)}%`;
+      merged.push(cur);
+      this.renderChunks(merged, duration);
+    }
+    clearChunks() {
+      if (this.preloadBar) {
+        while (this.preloadBar.firstChild) {
+          this.preloadBar.removeChild(this.preloadBar.firstChild);
+        }
+      }
+    }
+    renderChunks(ranges, duration) {
+      if (!this.preloadBar) return;
+      const container = this.preloadBar;
+      const existing = container.children;
+      while (existing.length < ranges.length) {
+        const chunk = document.createElement("div");
+        chunk.className = "art-progress-smart-chunk";
+        container.appendChild(chunk);
+      }
+      while (existing.length > ranges.length) {
+        container.removeChild(container.lastChild);
+      }
+      for (let i = 0; i < ranges.length; i++) {
+        const chunk = existing[i];
+        const r = ranges[i];
+        const leftPct = Math.max(0, Math.min(100, r.start / duration * 100));
+        const rightPct = Math.max(0, Math.min(100, r.end / duration * 100));
+        const widthPct = Math.max(0, rightPct - leftPct);
+        chunk.style.left = `${leftPct.toFixed(2)}%`;
+        chunk.style.width = `${widthPct.toFixed(2)}%`;
+      }
     }
     destroy() {
       if (this.timer) {

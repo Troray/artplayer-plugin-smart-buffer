@@ -10,7 +10,7 @@ function injectProgressStyles(): void {
   const style = document.createElement('style');
   style.id = PROGRESS_STYLE_ID;
   style.textContent = `
-    /* 浅绿色 Smart Buffer 预加载安全区进度条 */
+    /* Smart Buffer 预加载分段底轨容器 */
     .art-video-player .art-control-progress-inner .art-progress-smart-preloaded,
     .art-video-player .art-progress .art-control-progress-inner .art-progress-smart-preloaded,
     .art-video-player .art-progress .art-progress-smart-preloaded {
@@ -19,16 +19,27 @@ function injectProgressStyles(): void {
       top: 0 !important;
       bottom: 0 !important;
       height: 100% !important;
-      width: 0%;
-      background: #4ade80 !important; /* 清晰鲜明的浅绿色 (Tailwind Green 400) */
+      width: 100% !important;
+      background: transparent !important;
       z-index: 15 !important; /* 高于原生 loaded (10)，低于 played (20) */
       pointer-events: none !important;
       border-radius: 2px;
-      transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: 0 0 8px rgba(35, 158, 80, 0.7);
     }
 
-    /* 原生 loaded 缓冲条在 Smart Buffer 激活时同步设为浅绿色，彻底告别沉闷灰色 */
+    /* 离散分段缓存色块（真实呈现连续缓冲与断层空洞） */
+    .art-video-player .art-progress-smart-chunk {
+      position: absolute !important;
+      top: 0 !important;
+      bottom: 0 !important;
+      height: 100% !important;
+      background: #4ade80 !important; /* 清晰鲜明的浅绿色 (Tailwind Green 400) */
+      border-radius: 2px;
+      pointer-events: none !important;
+      box-shadow: 0 0 8px rgba(35, 158, 80, 0.7);
+      transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* 原生 loaded 缓冲条在 Smart Buffer 激活时设为半透明浅绿色 */
     .art-video-player.art-smart-buffer-enabled .art-progress-loaded {
       background-color: rgba(35, 158, 80, 0.5) !important;
     }
@@ -123,7 +134,7 @@ export class ProgressBarTracker {
     }
 
     if (!this.engine.getConfig().enabled) {
-      this.preloadBar.style.width = '0%';
+      this.clearChunks();
       this.preloadBar.style.display = 'none';
       if (this.art.template && this.art.template.$player) {
         this.art.template.$player.classList.remove('art-smart-buffer-enabled');
@@ -141,35 +152,92 @@ export class ProgressBarTracker {
 
     const duration = video.duration || this.art.duration || 0;
     if (!duration || duration <= 0 || isNaN(duration) || !isFinite(duration)) {
-      this.preloadBar.style.width = '0%';
+      this.clearChunks();
       return;
     }
 
-    // 1. 获取原生 HTML5 / MSE 已解码缓冲区的最远时间戳
-    let maxBuffered = 0;
+    // 收集所有有效区间：原生 MSE 缓冲区与 SegmentCache 中真实已完成分片区间
+    interface TimeRange {
+      start: number;
+      end: number;
+    }
+    const allRanges: TimeRange[] = [];
+
+    // 1. MSE 已解码缓冲区
     if (video.buffered && video.buffered.length > 0) {
       for (let i = 0; i < video.buffered.length; i++) {
         const start = video.buffered.start(i);
         const end = video.buffered.end(i);
-        if (video.currentTime >= start - 1 && video.currentTime <= end + 1) {
-          maxBuffered = Math.max(maxBuffered, end);
-        } else if (end > maxBuffered && start <= video.currentTime + 60) {
-          maxBuffered = Math.max(maxBuffered, end);
+        if (end > start) {
+          allRanges.push({ start, end });
         }
-      }
-      if (maxBuffered === 0) {
-        maxBuffered = video.buffered.end(video.buffered.length - 1);
       }
     }
 
-    // 2. 获取 Smart Buffer 内存缓存池中已就绪分片的最远时间戳
-    const maxCached = this.engine.segmentCache.getMaxCachedTime();
+    // 2. SegmentCache 中真实已完成分片区间
+    const cachedRanges = this.engine.segmentCache.getCachedTimeRanges();
+    allRanges.push(...cachedRanges);
 
-    // 3. 取两者最大者作为真正的安全预加载视界
-    const furthestPreload = Math.max(maxBuffered, maxCached);
-    const pct = Math.min(100, Math.max(0, (furthestPreload / duration) * 100));
+    if (allRanges.length === 0) {
+      this.clearChunks();
+      return;
+    }
 
-    this.preloadBar.style.width = `${pct.toFixed(2)}%`;
+    // 3. 排序与合并重叠或连续分片（容差 0.25s，超出则保留空白缝隙呈现断层空洞）
+    allRanges.sort((a, b) => a.start - b.start);
+    const merged: TimeRange[] = [];
+    let cur = { start: allRanges[0].start, end: allRanges[0].end };
+
+    for (let i = 1; i < allRanges.length; i++) {
+      const next = allRanges[i];
+      if (next.start <= cur.end + 0.25) {
+        cur.end = Math.max(cur.end, next.end);
+      } else {
+        merged.push({ ...cur });
+        cur = { start: next.start, end: next.end };
+      }
+    }
+    merged.push(cur);
+
+    // 4. 多段离散色块渲染
+    this.renderChunks(merged, duration);
+  }
+
+  private clearChunks(): void {
+    if (this.preloadBar) {
+      while (this.preloadBar.firstChild) {
+        this.preloadBar.removeChild(this.preloadBar.firstChild);
+      }
+    }
+  }
+
+  private renderChunks(ranges: Array<{ start: number; end: number }>, duration: number): void {
+    if (!this.preloadBar) return;
+
+    const container = this.preloadBar;
+    const existing = container.children;
+
+    // 保持 DOM 元素数量与区间数量一致
+    while (existing.length < ranges.length) {
+      const chunk = document.createElement('div');
+      chunk.className = 'art-progress-smart-chunk';
+      container.appendChild(chunk);
+    }
+    while (existing.length > ranges.length) {
+      container.removeChild(container.lastChild!);
+    }
+
+    // 真实呈现各连续区间的物理比例与空洞间隙
+    for (let i = 0; i < ranges.length; i++) {
+      const chunk = existing[i] as HTMLDivElement;
+      const r = ranges[i];
+      const leftPct = Math.max(0, Math.min(100, (r.start / duration) * 100));
+      const rightPct = Math.max(0, Math.min(100, (r.end / duration) * 100));
+      const widthPct = Math.max(0, rightPct - leftPct);
+
+      chunk.style.left = `${leftPct.toFixed(2)}%`;
+      chunk.style.width = `${widthPct.toFixed(2)}%`;
+    }
   }
 
   public destroy(): void {

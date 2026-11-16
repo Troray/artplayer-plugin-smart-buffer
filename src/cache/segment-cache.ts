@@ -1,5 +1,10 @@
 import { SegmentCacheItem } from '../types';
 
+export interface TimeRange {
+  start: number;
+  end: number;
+}
+
 export class SegmentCache {
   private cache: Map<string, SegmentCacheItem> = new Map();
   private maxCacheSizeBytes: number;
@@ -174,6 +179,66 @@ export class SegmentCache {
     }
     this.cache.clear();
     this.currentSizeBytes = 0;
+  }
+
+  /**
+   * 检查在指定时间点之后是否存在已缓存就绪的分片（用于判断当前分片是否处于断层空洞中）
+   */
+  public hasSegmentAfter(level: number, time: number): boolean {
+    for (const item of this.cache.values()) {
+      if (
+        item.level === level &&
+        item.status === 'completed' &&
+        typeof item.startTime === 'number' &&
+        item.startTime >= time
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 计算当前所有已完成分片的真实连续时间区间（合并重叠与邻接分片，识别离散断层空洞）
+   */
+  public getCachedTimeRanges(): TimeRange[] {
+    const rawRanges: TimeRange[] = [];
+
+    for (const item of this.cache.values()) {
+      if (
+        item.status === 'completed' &&
+        typeof item.startTime === 'number' &&
+        typeof item.duration === 'number' &&
+        item.duration > 0
+      ) {
+        rawRanges.push({
+          start: item.startTime,
+          end: item.startTime + item.duration,
+        });
+      }
+    }
+
+    if (rawRanges.length === 0) return [];
+
+    // 按起始时间升序排序
+    rawRanges.sort((a, b) => a.start - b.start);
+
+    // 合并重叠或邻接分片（允许 0.25s 容差，超出则视为断层空洞）
+    const merged: TimeRange[] = [];
+    let current = { start: rawRanges[0].start, end: rawRanges[0].end };
+
+    for (let i = 1; i < rawRanges.length; i++) {
+      const next = rawRanges[i];
+      if (next.start <= current.end + 0.25) {
+        current.end = Math.max(current.end, next.end);
+      } else {
+        merged.push({ ...current });
+        current = { start: next.start, end: next.end };
+      }
+    }
+    merged.push(current);
+
+    return merged;
   }
 
   private enforceLimit(): void {
