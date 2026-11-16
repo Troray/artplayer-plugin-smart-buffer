@@ -2,7 +2,7 @@
 
 > 适用于 ArtPlayer 的智能视频加载与多分片并发预加载引擎插件。专为弱网、高延迟、带宽波动等恶劣网络环境设计，提供类似 IDM / XDM 多线程加速的视频预加载体验，彻底消除缓冲卡顿。
 
-[![npm version](https://img.shields.io/badge/npm-v1.0.0-blue.svg)](https://www.npmjs.com/)
+[![npm version](https://img.shields.io/npm/v/artplayer-plugin-smart-buffer.svg)](https://www.npmjs.com/package/artplayer-plugin-smart-buffer)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![author](https://img.shields.io/badge/author-Troray-blue.svg)](https://github.com/Troray)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Strict-blue.svg)](https://www.typescriptlang.org/)
@@ -111,9 +111,11 @@ const art = new Artplayer({
 - **浅白色**：原生 HTML5 / MSE 已解码缓冲；
 - **浅绿色**：Smart Buffer 多线程已提前拉取并就绪于高速内存中的**安全防护区**。
 用户可一目了然看清预加载储备量，彻底告别盲目等待。
+
+| 参数 | 类型 | 默认值 | 可选值 | 说明 |
+|---|---|---|---|---|
 | `backgroundPreload` | `boolean` | `false` | `true / false` | 视频暂停时是否继续在后台预加载后续分片 |
 | `showNetworkStatus` | `boolean` | `true` | `true / false` | 是否在播放器设置面板中展示实时性能状态卡片 |
-
 ---
 
 ## 📊 实时网络与缓冲监控看板 (Toolbar Status Control)
