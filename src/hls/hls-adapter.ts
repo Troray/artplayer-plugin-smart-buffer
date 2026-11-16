@@ -7,7 +7,7 @@ import { PrefetchScheduler } from '../scheduler/prefetch-scheduler';
 import { AdaptiveQualityController } from '../abr/quality-controller';
 import { DynamicBufferManager } from '../buffer/buffer-manager';
 import { RecoveryManager } from '../recovery/recovery-manager';
-import { SmartFragmentLoader, setGlobalEngineContext } from './smart-loader';
+import { SmartFragmentLoader, createSmartFragmentLoader, setGlobalEngineContext } from './smart-loader';
 
 export class HlsAdapter {
   private hls?: Hls;
@@ -75,6 +75,18 @@ export class HlsAdapter {
 
     this.hls = hls;
     this.video = video;
+
+    // Decorate Hls fragment loader if not already decorated
+    if (hls && hls.config) {
+      if ((hls.config as any).withCredentials && !this.config.withCredentials) {
+        this.config.withCredentials = true;
+        this.scheduler.updateConfig(this.config);
+      }
+      const currentFLoader = hls.config.fLoader || hls.config.loader;
+      if (currentFLoader && !(currentFLoader as any).__isSmartLoader) {
+        hls.config.fLoader = createSmartFragmentLoader(currentFLoader);
+      }
+    }
 
     this.manifestObserver.attachHls(hls);
     this.qualityController.attachHls(hls);

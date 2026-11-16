@@ -101,6 +101,8 @@ const art = new Artplayer({
 | `dynamicConcurrency` | `boolean` | `true` | `true / false` | 网络较差或卡顿时是否自动下调并发避免争抢带宽 |
 | `backgroundPreload` | `boolean` | `false` | `true / false` | 视频暂停时是否继续在后台预加载后续分片 |
 | `showNetworkStatus` | `boolean` | `true` | `true / false` | 是否在播放器设置面板中展示实时性能状态卡片 |
+| `withCredentials` | `boolean` | `false` | `true / false` | 是否在跨域请求分片时携带凭据 (Cookie / Auth) |
+| `customFetcher` | `function` | `undefined` | `Function` | 自定义底层网络请求传输函数 (如代理、鉴权、特权通道等) |
 
 ---
 
@@ -112,10 +114,6 @@ const art = new Artplayer({
 - **浅绿色**：Smart Buffer 多线程已提前拉取并就绪于高速内存中的**安全防护区**。
 用户可一目了然看清预加载储备量，彻底告别盲目等待。
 
-| 参数 | 类型 | 默认值 | 可选值 | 说明 |
-|---|---|---|---|---|
-| `backgroundPreload` | `boolean` | `false` | `true / false` | 视频暂停时是否继续在后台预加载后续分片 |
-| `showNetworkStatus` | `boolean` | `true` | `true / false` | 是否在播放器设置面板中展示实时性能状态卡片 |
 ---
 
 ## 📊 实时网络与缓冲监控看板 (Toolbar Status Control)
@@ -168,6 +166,12 @@ ArtPlayer 实例
    通过 `AbortController` 瞬时中止已偏离新视窗的无效请求，杜绝多余流量开销。
 3. **关闭插件平滑降级**：
    用户关闭智能加载后，系统自动释放预加载队列和缓存，无缝回退到原生加载路径，不影响常规播放。
+4. **切片伪头自动对齐与清洗 (`stripTsHeader`)**：
+   支持包含伪装图像头 (PNG/JPEG) 的 TS 切片，滑动窗口定位 `0x47` 同步字并切除伪装头，杜绝 HLS.js Demuxer 报同步字缺失卡死。
+5. **高阶装饰器加载器 (`createSmartFragmentLoader`)**：
+   完美兼容项目中已有的自定义 HLS Loader（解密、代理或鉴权 Loader），实现 0ms 内存缓存直出 + 挂接在途请求 + 优雅降级全链路串联。
+6. **抽象传输层 (`customFetcher`)**：
+   支持为预加载任务注入自定义 fetch 请求通道与凭据携带 (`withCredentials`)，无缝适应复杂代理或特权运行时环境。
 
 ---
 

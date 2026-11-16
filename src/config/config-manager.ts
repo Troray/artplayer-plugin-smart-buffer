@@ -114,6 +114,11 @@ export class ConfigManager {
     sanitized.dynamicConcurrency = Boolean(cfg.dynamicConcurrency);
     sanitized.backgroundPreload = Boolean(cfg.backgroundPreload);
     sanitized.showNetworkStatus = Boolean(cfg.showNetworkStatus);
+    sanitized.withCredentials = Boolean(cfg.withCredentials);
+
+    if (typeof cfg.customFetcher === 'function') {
+      sanitized.customFetcher = cfg.customFetcher;
+    }
 
     return sanitized;
   }

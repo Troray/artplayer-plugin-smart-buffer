@@ -3,7 +3,7 @@ import type Hls from 'hls.js';
 import { SmartBufferEngine } from './engine';
 import { SettingsPanel } from './ui/settings-panel';
 import { StatusControl } from './ui/status-control';
-import { SmartFragmentLoader } from './hls/smart-loader';
+import { SmartFragmentLoader, createSmartFragmentLoader, stripTsHeader } from './hls/smart-loader';
 import { PluginOptions, SmartBufferPluginInstance } from './types';
 
 export * from './types';
@@ -84,11 +84,17 @@ artplayerPluginSmartBuffer.createHlsCustomType = function (
         (art as any).hls.destroy();
       }
 
+      const BaseLoader =
+        customConfig?.fLoader ||
+        customConfig?.loader ||
+        HlsConstructor.DefaultConfig?.loader;
+      const fLoader = createSmartFragmentLoader(BaseLoader);
+
       const hlsConfig = {
-        fLoader: SmartFragmentLoader,
         maxBufferLength: 60,
         maxMaxBufferLength: 120,
         ...customConfig,
+        fLoader,
       };
 
       const hls = new HlsConstructor(hlsConfig);

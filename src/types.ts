@@ -24,7 +24,7 @@ export interface SmartBufferConfig {
   /** 最大缓冲时间 (秒) */
   maxBufferLength: number;
 
-  /** 最大预加载分片数 (1-10) */
+  /** 最大预加载分片数 (1-20) */
   maxPreloadSegments: number;
 
   /** 最大缓存容量 (MB) */
@@ -50,6 +50,12 @@ export interface SmartBufferConfig {
 
   /** 是否显示实时网络监控面板/信息 */
   showNetworkStatus: boolean;
+
+  /** 自定义底层网络请求传输函数 (如代理、鉴权、特权通道等) */
+  customFetcher?: (url: string, init?: RequestInit) => Promise<ArrayBuffer | Response>;
+
+  /** 是否在请求跨域分片时携带凭证 (withCredentials) */
+  withCredentials?: boolean;
 }
 
 export interface SegmentCacheItem {

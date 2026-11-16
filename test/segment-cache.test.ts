@@ -126,4 +126,29 @@ describe('SegmentCache', () => {
     expect(cache.has(kL0)).toBe(false);
     expect(cache.has(kL1)).toBe(true);
   });
+
+  it('should find items by level and sequence number even when URL varies', () => {
+    const key = cache.generateKey(0, 42, 'http://cdn1.com/video_42.ts?token=abc');
+    cache.put({
+      key,
+      url: 'http://cdn1.com/video_42.ts?token=abc',
+      sn: 42,
+      level: 0,
+      startTime: 168,
+      duration: 4,
+      quality: 0,
+      size: 500,
+      data: new ArrayBuffer(500),
+      status: 'completed',
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now(),
+    });
+
+    const found = cache.getByLevelAndSn(0, 42);
+    expect(found).toBeDefined();
+    expect(found?.key).toBe(key);
+
+    const notFound = cache.getByLevelAndSn(0, 43);
+    expect(notFound).toBeUndefined();
+  });
 });

@@ -1,5 +1,5 @@
 import Artplayer from 'artplayer';
-import Hls, { Fragment, Loader, FragmentLoaderContext, LoaderStats, LoaderConfiguration, LoaderCallbacks } from 'hls.js';
+import Hls, { Fragment, LoaderStats, FragmentLoaderContext, LoaderCallbacks, LoaderConfiguration } from 'hls.js';
 
 type PresetMode = 'default' | 'weak-network' | 'high-speed' | 'stable' | 'custom';
 type NetworkQuality = 'extreme-poor' | 'poor' | 'fair' | 'good' | 'excellent';
@@ -16,7 +16,7 @@ interface SmartBufferConfig {
     targetBufferLength: number;
     /** 最大缓冲时间 (秒) */
     maxBufferLength: number;
-    /** 最大预加载分片数 (1-10) */
+    /** 最大预加载分片数 (1-20) */
     maxPreloadSegments: number;
     /** 最大缓存容量 (MB) */
     maxCacheSizeMB: number;
@@ -34,6 +34,10 @@ interface SmartBufferConfig {
     backgroundPreload: boolean;
     /** 是否显示实时网络监控面板/信息 */
     showNetworkStatus: boolean;
+    /** 自定义底层网络请求传输函数 (如代理、鉴权、特权通道等) */
+    customFetcher?: (url: string, init?: RequestInit) => Promise<ArrayBuffer | Response>;
+    /** 是否在请求跨域分片时携带凭证 (withCredentials) */
+    withCredentials?: boolean;
 }
 interface SegmentCacheItem {
     key: string;
@@ -190,6 +194,10 @@ declare class SegmentCache {
     }): string;
     has(key: string): boolean;
     get(key: string): SegmentCacheItem | undefined;
+    getByLevelAndSn(level: number, sn: number | string, byteRange?: {
+        start: number;
+        end: number;
+    }): SegmentCacheItem | undefined;
     put(item: SegmentCacheItem): void;
     markCompleted(key: string, data: ArrayBuffer): void;
     markFailed(key: string): void;
@@ -331,6 +339,17 @@ declare class PriorityTaskQueue {
     getAll(): ScheduledTask[];
 }
 
+interface ActivePrefetchTask {
+    abortController: AbortController;
+    priority: TaskPriority;
+    promise: Promise<ArrayBuffer>;
+    level: number;
+    sn: number | string;
+    byteRange?: {
+        start: number;
+        end: number;
+    };
+}
 declare class PrefetchScheduler {
     private config;
     private cache;
@@ -343,11 +362,11 @@ declare class PrefetchScheduler {
     constructor(config: SmartBufferConfig, cache: SegmentCache, networkMonitor: NetworkMonitor, manifestObserver: ManifestObserver, recoveryManager: RecoveryManager, bufferManager: DynamicBufferManager);
     updateConfig(config: SmartBufferConfig): void;
     getActiveConcurrency(): number;
-    getActiveTask(key: string): {
-        abortController: AbortController;
-        priority: TaskPriority;
-        promise: Promise<ArrayBuffer>;
-    } | undefined;
+    getActiveTask(key: string): ActivePrefetchTask | undefined;
+    getActiveTaskBySn(level: number, sn: number | string, byteRange?: {
+        start: number;
+        end: number;
+    }): ActivePrefetchTask | undefined;
     /**
      * Fetch a segment with specified priority.
      * If already cached, returns immediately.
@@ -554,16 +573,40 @@ interface SmartLoaderContextHolder {
     isEnabled: () => boolean;
 }
 declare function setGlobalEngineContext(context: SmartLoaderContextHolder): void;
-declare const DefaultLoaderClass: any;
-declare class SmartFragmentLoader extends DefaultLoaderClass implements Loader<FragmentLoaderContext> {
-    stats: LoaderStats;
-    context: FragmentLoaderContext | null;
-    private callbacks;
-    constructor(config?: any);
-    abort(): void;
-    destroy(): void;
-    load(context: FragmentLoaderContext, config: LoaderConfiguration, callbacks: LoaderCallbacks<FragmentLoaderContext>): void;
-}
+/**
+ * 切片二进制伪头对齐与清洗机制 (MPEG-2 TS 0x47 Sync Byte Search)
+ * 部分防盗链或伪装源会在 TS 分片前增加数百至数千字节的图像头 (PNG/JPEG) 或自定义填充。
+ * 本函数通过滑动窗口探测三个连续满足 188 字节步长的 0x47 同步字，自动剥离伪装头。
+ */
+declare function stripTsHeader(data: ArrayBuffer, searchLimit?: number): ArrayBuffer;
+/**
+ * 装饰器工厂函数：创建并返回包装了 BaseLoaderClass 的 SmartFragmentLoader 类
+ * 完美级联用户的自定义 Loader（如解密、代理或特殊网络通道 Loader）
+ */
+declare function createSmartFragmentLoader(BaseLoaderClass?: any): {
+    new (config?: any): {
+        [x: string]: any;
+        stats: LoaderStats;
+        context: FragmentLoaderContext | null;
+        callbacks: LoaderCallbacks<FragmentLoaderContext> | null;
+        abort(): void;
+        destroy(): void;
+        load(context: FragmentLoaderContext, config: LoaderConfiguration, callbacks: LoaderCallbacks<FragmentLoaderContext>): void;
+    };
+    [x: string]: any;
+};
+declare const SmartFragmentLoader: {
+    new (config?: any): {
+        [x: string]: any;
+        stats: LoaderStats;
+        context: FragmentLoaderContext | null;
+        callbacks: LoaderCallbacks<FragmentLoaderContext> | null;
+        abort(): void;
+        destroy(): void;
+        load(context: FragmentLoaderContext, config: LoaderConfiguration, callbacks: LoaderCallbacks<FragmentLoaderContext>): void;
+    };
+    [x: string]: any;
+};
 
 declare class StatusCard {
     private engine;
@@ -612,4 +655,4 @@ declare namespace artplayerPluginSmartBuffer {
 }
 declare const createHlsCustomType: (HlsClass?: any, customConfig?: Record<string, any>) => (video: HTMLVideoElement, url: string, art: Artplayer) => void;
 
-export { AdaptiveQualityController, type ConfigChangeListener, ConfigManager, DEFAULT_CONFIG, DynamicBufferManager, type EngineStatus, type FragmentInfo, HlsAdapter, ManifestObserver, type Mp4Chunk, Mp4RangeEngine, NetworkMonitor, type NetworkQuality, type NetworkStats, PRESET_CONFIGS, type PluginOptions, PrefetchScheduler, type PresetMode, PriorityTaskQueue, ProgressBarTracker, RTTDetector, RecoveryManager, type RetryOptions, type ScheduledTask, SegmentCache, type SegmentCacheItem, SettingsPanel, type SmartBufferConfig, SmartBufferEngine, type SmartBufferPluginInstance, SmartFragmentLoader, type SmartLoaderContextHolder, StatusCard, StatusControl, TaskPriority, ThroughputDetector, type ThroughputSample, artplayerPluginSmartBuffer, createHlsCustomType, artplayerPluginSmartBuffer as default, setGlobalEngineContext };
+export { type ActivePrefetchTask, AdaptiveQualityController, type ConfigChangeListener, ConfigManager, DEFAULT_CONFIG, DynamicBufferManager, type EngineStatus, type FragmentInfo, HlsAdapter, ManifestObserver, type Mp4Chunk, Mp4RangeEngine, NetworkMonitor, type NetworkQuality, type NetworkStats, PRESET_CONFIGS, type PluginOptions, PrefetchScheduler, type PresetMode, PriorityTaskQueue, ProgressBarTracker, RTTDetector, RecoveryManager, type RetryOptions, type ScheduledTask, SegmentCache, type SegmentCacheItem, SettingsPanel, type SmartBufferConfig, SmartBufferEngine, type SmartBufferPluginInstance, SmartFragmentLoader, type SmartLoaderContextHolder, StatusCard, StatusControl, TaskPriority, ThroughputDetector, type ThroughputSample, artplayerPluginSmartBuffer, createHlsCustomType, createSmartFragmentLoader, artplayerPluginSmartBuffer as default, setGlobalEngineContext, stripTsHeader };

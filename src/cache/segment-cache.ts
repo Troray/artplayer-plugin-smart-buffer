@@ -33,6 +33,31 @@ export class SegmentCache {
     return item;
   }
 
+  public getByLevelAndSn(
+    level: number,
+    sn: number | string,
+    byteRange?: { start: number; end: number }
+  ): SegmentCacheItem | undefined {
+    for (const item of this.cache.values()) {
+      if (item.level === level && String(item.sn) === String(sn)) {
+        if (!byteRange && !item.byteRange) {
+          item.lastAccessedAt = Date.now();
+          return item;
+        }
+        if (
+          byteRange &&
+          item.byteRange &&
+          byteRange.start === item.byteRange.start &&
+          byteRange.end === item.byteRange.end
+        ) {
+          item.lastAccessedAt = Date.now();
+          return item;
+        }
+      }
+    }
+    return undefined;
+  }
+
   public put(item: SegmentCacheItem): void {
     const existing = this.cache.get(item.key);
     if (existing && existing.data) {

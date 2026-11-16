@@ -16,6 +16,7 @@ export const DEFAULT_CONFIG: SmartBufferConfig = {
   dynamicConcurrency: true,
   backgroundPreload: false,
   showNetworkStatus: true,
+  withCredentials: false,
 };
 
 export const PRESET_CONFIGS: Record<Exclude<PresetMode, 'custom'>, Partial<SmartBufferConfig>> = {

@@ -5,6 +5,16 @@ import { ManifestObserver, FragmentInfo } from '../hls/manifest-observer';
 import { RecoveryManager } from '../recovery/recovery-manager';
 import { DynamicBufferManager } from '../buffer/buffer-manager';
 import { PriorityTaskQueue, TaskPriority, ScheduledTask } from './priority-queue';
+import { stripTsHeader } from '../hls/smart-loader';
+
+export interface ActivePrefetchTask {
+  abortController: AbortController;
+  priority: TaskPriority;
+  promise: Promise<ArrayBuffer>;
+  level: number;
+  sn: number | string;
+  byteRange?: { start: number; end: number };
+}
 
 export class PrefetchScheduler {
   private config: SmartBufferConfig;
@@ -15,7 +25,7 @@ export class PrefetchScheduler {
   private bufferManager: DynamicBufferManager;
 
   private queue: PriorityTaskQueue = new PriorityTaskQueue();
-  private activeTasks: Map<string, { abortController: AbortController; priority: TaskPriority; promise: Promise<ArrayBuffer> }> = new Map();
+  private activeTasks: Map<string, ActivePrefetchTask> = new Map();
 
   constructor(
     config: SmartBufferConfig,
@@ -41,10 +51,29 @@ export class PrefetchScheduler {
     return this.activeTasks.size;
   }
 
-  public getActiveTask(
-    key: string
-  ): { abortController: AbortController; priority: TaskPriority; promise: Promise<ArrayBuffer> } | undefined {
+  public getActiveTask(key: string): ActivePrefetchTask | undefined {
     return this.activeTasks.get(key);
+  }
+
+  public getActiveTaskBySn(
+    level: number,
+    sn: number | string,
+    byteRange?: { start: number; end: number }
+  ): ActivePrefetchTask | undefined {
+    for (const task of this.activeTasks.values()) {
+      if (task.level === level && String(task.sn) === String(sn)) {
+        if (!byteRange && !task.byteRange) return task;
+        if (
+          byteRange &&
+          task.byteRange &&
+          byteRange.start === task.byteRange.start &&
+          byteRange.end === task.byteRange.end
+        ) {
+          return task;
+        }
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -235,25 +264,59 @@ export class PrefetchScheduler {
             headers['Range'] = `bytes=${frag.byteRange.start}-${frag.byteRange.end}`;
           }
 
-          const response = await fetch(frag.url, {
-            headers,
-            signal: abortController.signal,
-          });
+          let arrayBuffer: ArrayBuffer;
 
-          tfirst = performance.now();
+          if (typeof this.config.customFetcher === 'function') {
+            const fetchInit: RequestInit = {
+              headers,
+              signal: abortController.signal,
+              credentials: this.config.withCredentials ? 'include' : 'same-origin',
+            };
+            const result = await this.config.customFetcher(frag.url, fetchInit);
+            tfirst = performance.now();
 
-          if (!response.ok && response.status !== 206) {
-            const isRecoverable = this.recoveryManager.isRecoverableError(response.status);
-            if (!isRecoverable || attempts >= maxRetries - 1) {
-              throw new Error(`HTTP ${response.status} ${response.statusText}`);
+            if (result instanceof ArrayBuffer) {
+              arrayBuffer = result;
+            } else if (result && typeof (result as Response).arrayBuffer === 'function') {
+              const res = result as Response;
+              if (!res.ok && res.status !== 206) {
+                const isRecoverable = this.recoveryManager.isRecoverableError(res.status);
+                if (!isRecoverable || attempts >= maxRetries - 1) {
+                  throw new Error(`HTTP ${res.status} ${res.statusText}`);
+                }
+                attempts++;
+                const delay = this.recoveryManager.getBackoffDelay(attempts);
+                await new Promise((r) => setTimeout(r, delay));
+                continue;
+              }
+              arrayBuffer = await res.arrayBuffer();
+            } else {
+              throw new Error('customFetcher must return Promise<ArrayBuffer | Response>');
             }
-            attempts++;
-            const delay = this.recoveryManager.getBackoffDelay(attempts);
-            await new Promise((res) => setTimeout(res, delay));
-            continue;
+          } else {
+            const response = await fetch(frag.url, {
+              headers,
+              signal: abortController.signal,
+              credentials: this.config.withCredentials ? 'include' : 'same-origin',
+            });
+
+            tfirst = performance.now();
+
+            if (!response.ok && response.status !== 206) {
+              const isRecoverable = this.recoveryManager.isRecoverableError(response.status);
+              if (!isRecoverable || attempts >= maxRetries - 1) {
+                throw new Error(`HTTP ${response.status} ${response.statusText}`);
+              }
+              attempts++;
+              const delay = this.recoveryManager.getBackoffDelay(attempts);
+              await new Promise((res) => setTimeout(res, delay));
+              continue;
+            }
+
+            arrayBuffer = await response.arrayBuffer();
           }
 
-          const arrayBuffer = await response.arrayBuffer();
+          const cleanBuffer = stripTsHeader(arrayBuffer);
           const endTime = performance.now();
           const durationMs = Math.max(1, endTime - startTime);
           let rttMs = Math.max(1, tfirst - startTime);
@@ -261,14 +324,14 @@ export class PrefetchScheduler {
             rttMs = Math.max(1, Math.round(durationMs * 0.35));
           }
 
-          // Update cache
-          this.cache.markCompleted(key, arrayBuffer);
+          // Update cache with stripped clean TS buffer
+          this.cache.markCompleted(key, cleanBuffer);
 
           // Record network stats
-          this.networkMonitor.recordDownload(arrayBuffer.byteLength, durationMs, rttMs);
+          this.networkMonitor.recordDownload(cleanBuffer.byteLength, durationMs, rttMs);
           this.recoveryManager.recordSuccess();
 
-          return arrayBuffer;
+          return cleanBuffer;
         } catch (error: any) {
           if (abortController.signal.aborted) {
             this.cache.remove(key);
@@ -299,6 +362,9 @@ export class PrefetchScheduler {
       abortController,
       priority,
       promise: downloadPromise,
+      level: frag.level,
+      sn: frag.sn,
+      byteRange: frag.byteRange,
     });
 
     try {

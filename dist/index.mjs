@@ -14,7 +14,8 @@ var DEFAULT_CONFIG = {
   maxRetries: 5,
   dynamicConcurrency: true,
   backgroundPreload: false,
-  showNetworkStatus: true
+  showNetworkStatus: true,
+  withCredentials: false
 };
 var PRESET_CONFIGS = {
   // 默认模式：均衡 4线程/30s缓冲，适合常见日常网络
@@ -153,6 +154,10 @@ var ConfigManager = class {
     sanitized.dynamicConcurrency = Boolean(cfg.dynamicConcurrency);
     sanitized.backgroundPreload = Boolean(cfg.backgroundPreload);
     sanitized.showNetworkStatus = Boolean(cfg.showNetworkStatus);
+    sanitized.withCredentials = Boolean(cfg.withCredentials);
+    if (typeof cfg.customFetcher === "function") {
+      sanitized.customFetcher = cfg.customFetcher;
+    }
     return sanitized;
   }
   loadConfig(options) {
@@ -533,6 +538,21 @@ var SegmentCache = class {
       item.lastAccessedAt = Date.now();
     }
     return item;
+  }
+  getByLevelAndSn(level, sn, byteRange) {
+    for (const item of this.cache.values()) {
+      if (item.level === level && String(item.sn) === String(sn)) {
+        if (!byteRange && !item.byteRange) {
+          item.lastAccessedAt = Date.now();
+          return item;
+        }
+        if (byteRange && item.byteRange && byteRange.start === item.byteRange.start && byteRange.end === item.byteRange.end) {
+          item.lastAccessedAt = Date.now();
+          return item;
+        }
+      }
+    }
+    return void 0;
   }
   put(item) {
     const existing = this.cache.get(item.key);
@@ -1014,6 +1034,198 @@ var PriorityTaskQueue = class {
   }
 };
 
+// src/hls/smart-loader.ts
+import Hls2 from "hls.js";
+var globalEngineContext = {
+  isEnabled: () => false
+};
+function setGlobalEngineContext(context) {
+  globalEngineContext = context;
+  if (typeof window !== "undefined") {
+    window.__smartBufferEngineContext = context;
+  }
+}
+function stripTsHeader(data, searchLimit = 8192) {
+  if (!data || data.byteLength < 376) return data;
+  const uint8 = new Uint8Array(data);
+  if (uint8[0] === 71 && uint8[188] === 71) {
+    return data;
+  }
+  const limit = Math.min(uint8.length - 376, searchLimit);
+  for (let i = 0; i < limit; i++) {
+    if (uint8[i] === 71 && uint8[i + 188] === 71 && uint8[i + 376] === 71) {
+      return data.slice(i);
+    }
+  }
+  return data;
+}
+function createSmartFragmentLoader(BaseLoaderClass = Hls2.DefaultConfig?.loader || class {
+}) {
+  const SmartFragmentLoaderClass = class SmartFragmentLoader extends BaseLoaderClass {
+    constructor(config) {
+      super(config);
+      this.context = null;
+      this.callbacks = null;
+      this.stats = this.stats || {
+        aborted: false,
+        loaded: 0,
+        retry: 0,
+        total: 0,
+        chunkCount: 0,
+        bwEstimate: 0,
+        loading: { start: 0, first: 0, end: 0 },
+        parsing: { start: 0, end: 0 },
+        buffering: { start: 0, first: 0, end: 0 }
+      };
+    }
+    abort() {
+      if (typeof super.abort === "function") {
+        super.abort();
+      } else {
+        this.stats.aborted = true;
+        if (this.callbacks?.onAbort) {
+          this.callbacks.onAbort(this.stats, this.context, null);
+        }
+      }
+    }
+    destroy() {
+      if (typeof super.destroy === "function") {
+        super.destroy();
+      }
+      this.callbacks = null;
+      this.context = null;
+    }
+    load(context, config, callbacks) {
+      this.context = context;
+      this.callbacks = callbacks;
+      const { frag, url } = context;
+      const ctx = typeof window !== "undefined" && window.__smartBufferEngineContext || globalEngineContext;
+      const cache = ctx?.cache;
+      const scheduler = ctx?.scheduler;
+      if (ctx?.isEnabled() && cache && frag) {
+        let byteRange;
+        if (typeof frag.byteRangeStartOffset === "number" && typeof frag.byteRangeEndOffset === "number") {
+          byteRange = {
+            start: frag.byteRangeStartOffset,
+            end: frag.byteRangeEndOffset - 1
+          };
+        }
+        const requestUrl = frag.url || url;
+        const key = cache.generateKey(frag.level, frag.sn, requestUrl, byteRange);
+        const cached = cache.get(key) || cache.getByLevelAndSn(frag.level, frag.sn, byteRange);
+        if (cached && cached.status === "completed" && cached.data) {
+          const now = performance.now();
+          this.stats.loading.start = now;
+          this.stats.loading.first = now;
+          this.stats.loading.end = now;
+          const cleanData = stripTsHeader(cached.data);
+          this.stats.loaded = cleanData.byteLength;
+          this.stats.total = cleanData.byteLength;
+          const response = {
+            url: requestUrl,
+            data: cleanData.slice(0)
+            // slice 克隆防止 Demuxer Worker 传输所有权导致缓存失效
+          };
+          queueMicrotask(() => {
+            if (!this.stats.aborted && this.callbacks?.onSuccess) {
+              this.callbacks.onSuccess(response, this.stats, context, null);
+            }
+          });
+          return;
+        }
+        const active = scheduler?.getActiveTask(key) || scheduler?.getActiveTaskBySn?.(frag.level, frag.sn, byteRange);
+        if (active && active.promise) {
+          this.stats.loading.start = performance.now();
+          active.promise.then((arrayBuffer) => {
+            if (this.stats.aborted) return;
+            const now = performance.now();
+            this.stats.loading.first = this.stats.loading.first || now;
+            this.stats.loading.end = now;
+            const cleanData = stripTsHeader(arrayBuffer);
+            this.stats.loaded = cleanData.byteLength;
+            this.stats.total = cleanData.byteLength;
+            if (this.callbacks?.onSuccess) {
+              this.callbacks.onSuccess(
+                {
+                  url: requestUrl,
+                  data: cleanData.slice(0)
+                },
+                this.stats,
+                context,
+                null
+              );
+            }
+          }).catch(() => {
+            if (this.stats.aborted) return;
+            super.load(context, config, callbacks);
+          });
+          return;
+        }
+      }
+      const wrappedCallbacks = {
+        ...callbacks,
+        onSuccess: (response, stats, c, networkDetails) => {
+          if (response && response.data instanceof ArrayBuffer) {
+            response.data = stripTsHeader(response.data);
+            if (cache && c.frag) {
+              let byteRange;
+              if (typeof c.frag.byteRangeStartOffset === "number" && typeof c.frag.byteRangeEndOffset === "number") {
+                byteRange = {
+                  start: c.frag.byteRangeStartOffset,
+                  end: c.frag.byteRangeEndOffset - 1
+                };
+              }
+              const saveKey = cache.generateKey(c.frag.level, c.frag.sn, c.frag.url || c.url, byteRange);
+              cache.put({
+                key: saveKey,
+                url: c.frag.url || c.url,
+                sn: c.frag.sn,
+                level: c.frag.level,
+                startTime: c.frag.start,
+                duration: c.frag.duration,
+                quality: c.frag.level,
+                size: response.data.byteLength,
+                data: response.data.slice(0),
+                status: "completed",
+                createdAt: Date.now(),
+                lastAccessedAt: Date.now(),
+                byteRange
+              });
+              if (ctx?.networkMonitor) {
+                const duration = Math.max(1, stats.loading.end - stats.loading.start);
+                let rttMs = 0;
+                if (stats.loading && stats.loading.first > stats.loading.start) {
+                  rttMs = Math.max(1, stats.loading.first - stats.loading.start);
+                } else if (stats.tfirst && stats.trequest && stats.tfirst > stats.trequest) {
+                  rttMs = Math.max(1, stats.tfirst - stats.trequest);
+                }
+                if (rttMs <= 0 && typeof performance !== "undefined" && performance.getEntriesByName) {
+                  const entries = performance.getEntriesByName(c.url);
+                  if (entries.length > 0) {
+                    const entry = entries[entries.length - 1];
+                    if (entry.responseStart > entry.requestStart && entry.requestStart > 0) {
+                      rttMs = Math.round(entry.responseStart - entry.requestStart);
+                    }
+                  }
+                }
+                if (rttMs <= 0 && duration > 0) {
+                  rttMs = Math.max(1, Math.round(duration * 0.35));
+                }
+                ctx.networkMonitor.recordDownload(response.data.byteLength, duration, rttMs);
+              }
+            }
+          }
+          callbacks.onSuccess(response, stats, c, networkDetails);
+        }
+      };
+      super.load(context, config, wrappedCallbacks);
+    }
+  };
+  SmartFragmentLoaderClass.__isSmartLoader = true;
+  return SmartFragmentLoaderClass;
+}
+var SmartFragmentLoader = createSmartFragmentLoader();
+
 // src/scheduler/prefetch-scheduler.ts
 var PrefetchScheduler = class {
   constructor(config, cache, networkMonitor, manifestObserver, recoveryManager, bufferManager) {
@@ -1034,6 +1246,17 @@ var PrefetchScheduler = class {
   }
   getActiveTask(key) {
     return this.activeTasks.get(key);
+  }
+  getActiveTaskBySn(level, sn, byteRange) {
+    for (const task of this.activeTasks.values()) {
+      if (task.level === level && String(task.sn) === String(sn)) {
+        if (!byteRange && !task.byteRange) return task;
+        if (byteRange && task.byteRange && byteRange.start === task.byteRange.start && byteRange.end === task.byteRange.end) {
+          return task;
+        }
+      }
+    }
+    return void 0;
   }
   /**
    * Fetch a segment with specified priority.
@@ -1165,32 +1388,63 @@ var PrefetchScheduler = class {
           if (frag.byteRange) {
             headers["Range"] = `bytes=${frag.byteRange.start}-${frag.byteRange.end}`;
           }
-          const response = await fetch(frag.url, {
-            headers,
-            signal: abortController.signal
-          });
-          tfirst = performance.now();
-          if (!response.ok && response.status !== 206) {
-            const isRecoverable = this.recoveryManager.isRecoverableError(response.status);
-            if (!isRecoverable || attempts >= maxRetries - 1) {
-              throw new Error(`HTTP ${response.status} ${response.statusText}`);
+          let arrayBuffer;
+          if (typeof this.config.customFetcher === "function") {
+            const fetchInit = {
+              headers,
+              signal: abortController.signal,
+              credentials: this.config.withCredentials ? "include" : "same-origin"
+            };
+            const result = await this.config.customFetcher(frag.url, fetchInit);
+            tfirst = performance.now();
+            if (result instanceof ArrayBuffer) {
+              arrayBuffer = result;
+            } else if (result && typeof result.arrayBuffer === "function") {
+              const res = result;
+              if (!res.ok && res.status !== 206) {
+                const isRecoverable = this.recoveryManager.isRecoverableError(res.status);
+                if (!isRecoverable || attempts >= maxRetries - 1) {
+                  throw new Error(`HTTP ${res.status} ${res.statusText}`);
+                }
+                attempts++;
+                const delay = this.recoveryManager.getBackoffDelay(attempts);
+                await new Promise((r) => setTimeout(r, delay));
+                continue;
+              }
+              arrayBuffer = await res.arrayBuffer();
+            } else {
+              throw new Error("customFetcher must return Promise<ArrayBuffer | Response>");
             }
-            attempts++;
-            const delay = this.recoveryManager.getBackoffDelay(attempts);
-            await new Promise((res) => setTimeout(res, delay));
-            continue;
+          } else {
+            const response = await fetch(frag.url, {
+              headers,
+              signal: abortController.signal,
+              credentials: this.config.withCredentials ? "include" : "same-origin"
+            });
+            tfirst = performance.now();
+            if (!response.ok && response.status !== 206) {
+              const isRecoverable = this.recoveryManager.isRecoverableError(response.status);
+              if (!isRecoverable || attempts >= maxRetries - 1) {
+                throw new Error(`HTTP ${response.status} ${response.statusText}`);
+              }
+              attempts++;
+              const delay = this.recoveryManager.getBackoffDelay(attempts);
+              await new Promise((res) => setTimeout(res, delay));
+              continue;
+            }
+            arrayBuffer = await response.arrayBuffer();
           }
-          const arrayBuffer = await response.arrayBuffer();
+          const cleanBuffer = stripTsHeader(arrayBuffer);
           const endTime = performance.now();
           const durationMs = Math.max(1, endTime - startTime);
           let rttMs = Math.max(1, tfirst - startTime);
           if (rttMs >= durationMs) {
             rttMs = Math.max(1, Math.round(durationMs * 0.35));
           }
-          this.cache.markCompleted(key, arrayBuffer);
-          this.networkMonitor.recordDownload(arrayBuffer.byteLength, durationMs, rttMs);
+          this.cache.markCompleted(key, cleanBuffer);
+          this.networkMonitor.recordDownload(cleanBuffer.byteLength, durationMs, rttMs);
           this.recoveryManager.recordSuccess();
-          return arrayBuffer;
+          return cleanBuffer;
         } catch (error) {
           if (abortController.signal.aborted) {
             this.cache.remove(key);
@@ -1215,7 +1469,10 @@ var PrefetchScheduler = class {
     this.activeTasks.set(key, {
       abortController,
       priority,
-      promise: downloadPromise
+      promise: downloadPromise,
+      level: frag.level,
+      sn: frag.sn,
+      byteRange: frag.byteRange
     });
     try {
       const buffer = await downloadPromise;
@@ -1329,162 +1586,6 @@ var AdaptiveQualityController = class {
   }
 };
 
-// src/hls/smart-loader.ts
-import Hls2 from "hls.js";
-var globalEngineContext = {
-  isEnabled: () => false
-};
-function setGlobalEngineContext(context) {
-  globalEngineContext = context;
-}
-var DefaultLoaderClass = Hls2.DefaultConfig?.loader || class {
-};
-var SmartFragmentLoader = class extends DefaultLoaderClass {
-  constructor(config) {
-    super(config);
-    this.context = null;
-    this.callbacks = null;
-    this.stats = this.stats || {
-      aborted: false,
-      loaded: 0,
-      retry: 0,
-      total: 0,
-      chunkCount: 0,
-      bwEstimate: 0,
-      loading: { start: 0, first: 0, end: 0 },
-      parsing: { start: 0, end: 0 },
-      buffering: { start: 0, first: 0, end: 0 }
-    };
-  }
-  abort() {
-    if (typeof super.abort === "function") {
-      super.abort();
-    } else {
-      this.stats.aborted = true;
-      if (this.callbacks && this.callbacks.onAbort) {
-        this.callbacks.onAbort(this.stats, this.context, null);
-      }
-    }
-  }
-  destroy() {
-    if (typeof super.destroy === "function") {
-      super.destroy();
-    }
-    this.callbacks = null;
-    this.context = null;
-  }
-  load(context, config, callbacks) {
-    this.context = context;
-    this.callbacks = callbacks;
-    const { frag, url } = context;
-    if (!globalEngineContext.isEnabled() || !globalEngineContext.cache || !frag) {
-      super.load(context, config, callbacks);
-      return;
-    }
-    let byteRange;
-    if (typeof frag.byteRangeStartOffset === "number" && typeof frag.byteRangeEndOffset === "number") {
-      byteRange = {
-        start: frag.byteRangeStartOffset,
-        end: frag.byteRangeEndOffset - 1
-      };
-    }
-    const key = globalEngineContext.cache.generateKey(frag.level, frag.sn, url, byteRange);
-    const cached = globalEngineContext.cache.get(key);
-    if (cached && cached.status === "completed" && cached.data) {
-      const now = performance.now();
-      this.stats.loading.start = now;
-      this.stats.loading.first = now;
-      this.stats.loading.end = now;
-      this.stats.loaded = cached.size;
-      this.stats.total = cached.size;
-      const response = {
-        url,
-        data: cached.data.slice(0)
-        // ALWAYS clone so worker transfer does not neuter cached buffer!
-      };
-      queueMicrotask(() => {
-        if (!this.stats.aborted && this.callbacks?.onSuccess) {
-          this.callbacks.onSuccess(response, this.stats, context, null);
-        }
-      });
-      return;
-    }
-    const active = globalEngineContext.scheduler?.getActiveTask(key);
-    if (active) {
-      this.stats.loading.start = performance.now();
-      active.promise.then((arrayBuffer) => {
-        if (this.stats.aborted) return;
-        const now = performance.now();
-        this.stats.loading.first = this.stats.loading.first || now;
-        this.stats.loading.end = now;
-        this.stats.loaded = arrayBuffer.byteLength;
-        this.stats.total = arrayBuffer.byteLength;
-        if (this.callbacks?.onSuccess) {
-          this.callbacks.onSuccess(
-            {
-              url,
-              data: arrayBuffer.slice(0)
-            },
-            this.stats,
-            context,
-            null
-          );
-        }
-      }).catch(() => {
-        if (this.stats.aborted) return;
-        super.load(context, config, callbacks);
-      });
-      return;
-    }
-    const wrappedCallbacks = {
-      ...callbacks,
-      onSuccess: (response, stats, ctx, networkDetails) => {
-        if (response && response.data instanceof ArrayBuffer && globalEngineContext.cache && ctx.frag) {
-          globalEngineContext.cache.put({
-            key,
-            url: ctx.url,
-            sn: ctx.frag.sn,
-            level: ctx.frag.level,
-            startTime: ctx.frag.start,
-            duration: ctx.frag.duration,
-            quality: ctx.frag.level,
-            size: response.data.byteLength,
-            data: response.data.slice(0),
-            status: "completed",
-            createdAt: Date.now(),
-            lastAccessedAt: Date.now(),
-            byteRange
-          });
-          if (globalEngineContext.networkMonitor) {
-            const duration = Math.max(1, stats.loading.end - stats.loading.start);
-            let rttMs = 0;
-            if (stats.loading && stats.loading.first > stats.loading.start) {
-              rttMs = Math.max(1, stats.loading.first - stats.loading.start);
-            } else if (stats.tfirst && stats.trequest && stats.tfirst > stats.trequest) {
-              rttMs = Math.max(1, stats.tfirst - stats.trequest);
-            }
-            if (rttMs <= 0 && typeof performance !== "undefined" && performance.getEntriesByName) {
-              const entries = performance.getEntriesByName(ctx.url);
-              if (entries.length > 0) {
-                const entry = entries[entries.length - 1];
-                if (entry.responseStart > entry.requestStart && entry.requestStart > 0) {
-                  rttMs = Math.round(entry.responseStart - entry.requestStart);
-                }
-              }
-            }
-            if (rttMs <= 0 && duration > 0) {
-              rttMs = Math.max(1, Math.round(duration * 0.35));
-            }
-            globalEngineContext.networkMonitor.recordDownload(response.data.byteLength, duration, rttMs);
-          }
-        }
-        callbacks.onSuccess(response, stats, ctx, networkDetails);
-      }
-    };
-    super.load(context, config, wrappedCallbacks);
-  }
-};
-
 // src/hls/hls-adapter.ts
 var HlsAdapter = class {
   constructor(config, cache, networkMonitor, recoveryManager, bufferManager) {
@@ -1580,6 +1681,16 @@ var HlsAdapter = class {
     this.detach();
     this.hls = hls;
     this.video = video;
+    if (hls && hls.config) {
+      if (hls.config.withCredentials && !this.config.withCredentials) {
+        this.config.withCredentials = true;
+        this.scheduler.updateConfig(this.config);
+      }
+      const currentFLoader = hls.config.fLoader || hls.config.loader;
+      if (currentFLoader && !currentFLoader.__isSmartLoader) {
+        hls.config.fLoader = createSmartFragmentLoader(currentFLoader);
+      }
+    }
     this.manifestObserver.attachHls(hls);
     this.qualityController.attachHls(hls);
     this.networkMonitor.attachVideo(video);
@@ -2766,11 +2877,13 @@ artplayerPluginSmartBuffer.createHlsCustomType = function(HlsClass, customConfig
       if (art.hls) {
         art.hls.destroy();
       }
+      const BaseLoader = customConfig?.fLoader || customConfig?.loader || HlsConstructor.DefaultConfig?.loader;
+      const fLoader = createSmartFragmentLoader(BaseLoader);
       const hlsConfig = {
-        fLoader: SmartFragmentLoader,
         maxBufferLength: 60,
         maxMaxBufferLength: 120,
-        ...customConfig
+        ...customConfig,
+        fLoader
       };
       const hls = new HlsConstructor(hlsConfig);
       hls.loadSource(url);
@@ -2816,7 +2929,9 @@ export {
   ThroughputDetector,
   artplayerPluginSmartBuffer,
   createHlsCustomType,
+  createSmartFragmentLoader,
   index_default as default,
-  setGlobalEngineContext
+  setGlobalEngineContext,
+  stripTsHeader
 };
 //# sourceMappingURL=index.mjs.map

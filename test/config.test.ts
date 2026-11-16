@@ -81,4 +81,15 @@ describe('ConfigManager', () => {
     expect(notified).toBe(true);
     expect(changedKeys).toContain('targetBufferLength');
   });
+
+  it('should accept customFetcher and withCredentials', () => {
+    const dummyFetcher = async () => new ArrayBuffer(0);
+    manager.updateConfig({
+      withCredentials: true,
+      customFetcher: dummyFetcher,
+    });
+    const cfg = manager.getConfig();
+    expect(cfg.withCredentials).toBe(true);
+    expect(cfg.customFetcher).toBe(dummyFetcher);
+  });
 });
